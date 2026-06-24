@@ -1,12 +1,12 @@
 #!/usr/bin/env bpftrace
 
 BEGIN {
-    printf("Monitoring CUDA activity via parcagpu USDT probes...\n");
+    printf("Monitoring CUDA activity via colagpu USDT probes...\n");
     printf("%-20s %-12s %-10s %-10s %-10s %-10s %-10s %-10s %s\n",
            "TIME", "DURATION_NS", "CORR_ID", "DEVICE", "STREAM", "GRAPH", "NODE", "START", "KERNEL");
 }
 
-usdt:*:parcagpu:kernel_executed {
+usdt:*:colagpu:kernel_executed {
     $start = arg0;
     $end = arg1;
     $duration = $end - $start;
@@ -30,7 +30,7 @@ usdt:*:parcagpu:kernel_executed {
     printf("%s\n", $kernel_name);
 }
 
-usdt:*:parcagpu:cuda_correlation {
+usdt:*:colagpu:api_correlation {
     $correlation_id = arg0;
     $cbid = arg1;
     $name = str(arg2);
@@ -38,7 +38,7 @@ usdt:*:parcagpu:cuda_correlation {
     printf("%-12s.%-6u [CORR] %u: cbid=%u %s\n", strftime("%H:%M:%S", nsecs), (nsecs % 1000000000) / 1000, $correlation_id, $cbid, $name);
 }
 
-usdt:*:parcagpu:pc_sample_batch {
+usdt:*:colagpu:pc_sample_batch {
     $records = arg0;
     $count = arg1;
 
@@ -49,7 +49,7 @@ usdt:*:parcagpu:pc_sample_batch {
            $records);
 }
 
-usdt:*:parcagpu:stall_reason_map {
+usdt:*:colagpu:stall_reason_map {
     $names = arg0;
     $count = arg1;
 
@@ -60,7 +60,7 @@ usdt:*:parcagpu:stall_reason_map {
            $names);
 }
 
-usdt:*:parcagpu:cubin_loaded {
+usdt:*:colagpu:cubin_loaded {
     $cubin_crc = arg0;
     $cubin_size = arg2;
 
@@ -71,7 +71,7 @@ usdt:*:parcagpu:cubin_loaded {
            $cubin_size);
 }
 
-usdt:*:parcagpu:cubin_unloaded {
+usdt:*:colagpu:cubin_unloaded {
     $cubin_crc = arg0;
 
     printf("%-12s.%-6u [CUBIN_UNLOAD] crc=0x%lx\n",
@@ -80,7 +80,7 @@ usdt:*:parcagpu:cubin_unloaded {
            $cubin_crc);
 }
 
-usdt:*:parcagpu:activity_batch {
+usdt:*:colagpu:activity_batch {
     $ptrs = arg0;
     $count = arg1;
 
@@ -91,7 +91,7 @@ usdt:*:parcagpu:activity_batch {
            $ptrs);
 }
 
-usdt:*:parcagpu:gpu_config {
+usdt:*:colagpu:gpu_config {
     $device_id = arg0;
     $sampling_factor = arg1;
     $clock_khz = arg2;
@@ -106,7 +106,7 @@ usdt:*:parcagpu:gpu_config {
            $sm_count);
 }
 
-usdt:*:parcagpu:error {
+usdt:*:colagpu:error {
     $code = arg0;
     $message = str(arg1);
     $component = str(arg2);

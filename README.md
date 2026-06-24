@@ -5,7 +5,7 @@ CUDA profiling library that exposes GPU activity via USDT/DTRACE probes for eBPF
 ## Building
 
 ```bash
-make local     # Build libparcagpucupti.so locally (CMake, RelWithDebInfo)
+make local     # Build libcolacupti.so locally (CMake, RelWithDebInfo)
 make debug     # Build with full debug, no optimizations
 make clean     # Clean all build artifacts
 ```
@@ -24,7 +24,7 @@ make docker-push   # Push multi-arch image to ghcr.io
 ### As CUDA Injection Library
 
 ```bash
-export CUDA_INJECTION64_PATH=/path/to/libparcagpucupti.so
+export CUDA_INJECTION64_PATH=/path/to/libcolacupti.so
 ./my_cuda_app
 ```
 
@@ -32,10 +32,10 @@ export CUDA_INJECTION64_PATH=/path/to/libparcagpucupti.so
 
 | Variable | Default | Description |
 |---|---|---|
-| `PARCAGPU_DEBUG` | off | Enable debug logging |
-| `PARCAGPU_RATE_LIMIT` | 100 | Token-bucket rate limit for callback probes (events/sec per thread) |
-| `PARCAGPU_PC_SAMPLING_RATE` | (unset) | Setting this env var to a non-negative number enables PC sampling. The value is the target samples/sec; a controller adjusts the per-window dice-roll probability internally to converge on this rate. Set to 0 to enable sampling with rate control disabled (controller off, fixed probability). |
-| `PARCAGPU_SAMPLING_FACTOR` | 20 | Hardware PC sampling period (log2 cycles between samples). Only takes effect when PC sampling is enabled via `PARCAGPU_PC_SAMPLING_RATE`. |
+| `COLAGPU_DEBUG` | off | Enable debug logging |
+| `COLAGPU_RATE_LIMIT` | 100 | Token-bucket rate limit for callback probes (events/sec per thread) |
+| `COLAGPU_PC_SAMPLING_RATE` | (unset) | Setting this env var to a non-negative number enables PC sampling. The value is the target samples/sec; a controller adjusts the per-window dice-roll probability internally to converge on this rate. Set to 0 to enable sampling with rate control disabled (controller off, fixed probability). |
+| `COLAGPU_SAMPLING_FACTOR` | 20 | Hardware PC sampling period (log2 cycles between samples). Only takes effect when PC sampling is enabled via `COLAGPU_PC_SAMPLING_RATE`. |
 
 ### Monitoring with bpftrace
 
@@ -47,7 +47,7 @@ sudo bpftrace parcagpu.bt
 
 ```bash
 make bpf-test
-sudo test/bpf/activity_parser -pid <PID> -lib <path/to/libparcagpucupti.so> -v
+sudo test/bpf/activity_parser -pid <PID> -lib <path/to/libcolacupti.so> -v
 ```
 
 The activity parser attaches to all USDT probes via eBPF, captures events through a ring buffer, and resolves PC samples to source lines using `llvm-dwarfdump`.

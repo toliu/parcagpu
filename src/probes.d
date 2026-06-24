@@ -1,5 +1,5 @@
-provider parcagpu {
-  probe cuda_correlation(uint32_t correlationId, int signedCbid,
+provider colagpu {
+  probe api_correlation(uint32_t correlationId, int signedCbid,
                           const char *name);
   probe kernel_executed(uint64_t start, uint64_t end,
                         uint32_t correlationId, uint32_t deviceId,

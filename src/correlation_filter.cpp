@@ -58,7 +58,7 @@ void GraphCorrelationMap::cycle_start(uint32_t cycle) {
 }
 
 bool GraphCorrelationMap::check_and_mark_seen(uint32_t correlation_id,
-                                               uint32_t cycle) {
+                                              uint32_t cycle) {
   std::lock_guard<std::mutex> lock(mutex_);
   auto it = map_.find(correlation_id);
   if (it != map_.end()) {

@@ -1,8 +1,8 @@
 // Copyright 2026 The Parca Authors
 // SPDX-License-Identifier: Apache-2.0
 
-#ifndef PARCAGPU_TOKEN_BUCKET_H_
-#define PARCAGPU_TOKEN_BUCKET_H_
+#ifndef COLAGPU_TOKEN_BUCKET_H_
+#define COLAGPU_TOKEN_BUCKET_H_
 
 #include <cstdint>
 #include <time.h>
@@ -59,4 +59,4 @@ private:
 
 } // namespace parcagpu
 
-#endif // PARCAGPU_TOKEN_BUCKET_H_
+#endif // COLAGPU_TOKEN_BUCKET_H_

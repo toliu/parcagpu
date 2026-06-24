@@ -12,15 +12,14 @@ extern char **environ;
 
 namespace parcagpu {
 
-// Known PARCAGPU_* environment variables.
+// Known COLAGPU_* environment variables.
 static const char *knownVars[] = {
-    "PARCAGPU_DEBUG",
-    "PARCAGPU_RATE_LIMIT",
-    "PARCAGPU_SAMPLING_FACTOR",
-    "PARCAGPU_PC_SAMPLING_RATE",
+    "COLAGPU_DEBUG",
+    "COLAGPU_RATE_LIMIT",
+    "COLAGPU_SAMPLING_FACTOR",
+    "COLAGPU_PC_SAMPLING_RATE",
 };
-static constexpr size_t numKnownVars =
-    sizeof(knownVars) / sizeof(knownVars[0]);
+static constexpr size_t numKnownVars = sizeof(knownVars) / sizeof(knownVars[0]);
 
 static bool isKnown(const char *name, size_t nameLen) {
   for (size_t i = 0; i < numKnownVars; ++i) {
@@ -32,8 +31,8 @@ static bool isKnown(const char *name, size_t nameLen) {
 }
 
 void validateEnvVars() {
-  // Scan environment for unrecognized PARCAGPU_* variables.
-  static constexpr const char prefix[] = "PARCAGPU_";
+  // Scan environment for unrecognized COLAGPU_* variables.
+  static constexpr const char prefix[] = "COLAGPU_";
   static constexpr size_t prefixLen = sizeof(prefix) - 1;
 
   for (char **ep = environ; *ep; ++ep) {
@@ -47,7 +46,8 @@ void validateEnvVars() {
     if (!isKnown(*ep, nameLen)) {
       // Null-terminate for printing.
       char nameBuf[128] = {};
-      size_t copyLen = nameLen < sizeof(nameBuf) - 1 ? nameLen : sizeof(nameBuf) - 1;
+      size_t copyLen =
+          nameLen < sizeof(nameBuf) - 1 ? nameLen : sizeof(nameBuf) - 1;
       std::memcpy(nameBuf, *ep, copyLen);
 
       DEBUG_PRINTF("[PARCAGPU] Warning: unrecognized env var '%s'\n", nameBuf);
@@ -58,34 +58,36 @@ void validateEnvVars() {
   // Validate specific variables.
   const char *val;
 
-  val = std::getenv("PARCAGPU_RATE_LIMIT");
+  val = std::getenv("COLAGPU_RATE_LIMIT");
   if (val) {
     double rate = std::atof(val);
     if (rate <= 0) {
-      DEBUG_PRINTF("[PARCAGPU] Warning: PARCAGPU_RATE_LIMIT=%s invalid "
-                   "(must be > 0), using default\n", val);
-      fireError(0, val, "env_config: PARCAGPU_RATE_LIMIT invalid");
+      DEBUG_PRINTF("[PARCAGPU] Warning: COLAGPU_RATE_LIMIT=%s invalid "
+                   "(must be > 0), using default\n",
+                   val);
+      fireError(0, val, "env_config: COLAGPU_RATE_LIMIT invalid");
     }
   }
 
-  val = std::getenv("PARCAGPU_SAMPLING_FACTOR");
+  val = std::getenv("COLAGPU_SAMPLING_FACTOR");
   if (val) {
     int factor = std::atoi(val);
     if (factor != 0 && (factor < 5 || factor > 31)) {
-      DEBUG_PRINTF("[PARCAGPU] Warning: PARCAGPU_SAMPLING_FACTOR=%s out of "
-                   "range [0, 5-31], using default\n", val);
-      fireError(0, val, "env_config: PARCAGPU_SAMPLING_FACTOR out of range");
+      DEBUG_PRINTF("[PARCAGPU] Warning: COLAGPU_SAMPLING_FACTOR=%s out of "
+                   "range [0, 5-31], using default\n",
+                   val);
+      fireError(0, val, "env_config: COLAGPU_SAMPLING_FACTOR out of range");
     }
   }
 
-  val = std::getenv("PARCAGPU_PC_SAMPLING_RATE");
+  val = std::getenv("COLAGPU_PC_SAMPLING_RATE");
   if (val) {
     double r = std::atof(val);
     if (r < 0.0) {
-      DEBUG_PRINTF("[PARCAGPU] Warning: PARCAGPU_PC_SAMPLING_RATE=%s "
-                   "invalid (must be >= 0), using default\n", val);
-      fireError(0, val,
-                "env_config: PARCAGPU_PC_SAMPLING_RATE invalid");
+      DEBUG_PRINTF("[PARCAGPU] Warning: COLAGPU_PC_SAMPLING_RATE=%s "
+                   "invalid (must be >= 0), using default\n",
+                   val);
+      fireError(0, val, "env_config: COLAGPU_PC_SAMPLING_RATE invalid");
     }
   }
 }

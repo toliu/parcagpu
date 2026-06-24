@@ -51,12 +51,12 @@ fi
 
 echo ""
 echo "=== Running test program ==="
-# Set LD_LIBRARY_PATH so the test can find libcupti.so and libparcagpucupti.so at runtime
-# Set PARCAGPU_DEBUG to enable debug output
+# Set LD_LIBRARY_PATH so the test can find libcupti.so and libcolacupti.so at runtime
+# Set COLAGPU_DEBUG to enable debug output
 export LD_LIBRARY_PATH="$(pwd)/build-local/lib:$LD_LIBRARY_PATH"
-export PARCAGPU_DEBUG=1
+export COLAGPU_DEBUG=1
 # Run the test program with path to library
-./build-local/bin/test_cupti_prof build-local/lib/libparcagpucupti.so "$@"
+./build-local/bin/test_cupti_prof build-local/lib/libcolacupti.so "$@"
 
 # If bpftrace was started, stop it and show results
 if [ "$USE_BPFTRACE" -eq 1 ]; then

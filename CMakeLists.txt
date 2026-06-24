@@ -46,9 +46,9 @@ if(NOT DEFINED CUDA_INCLUDE_DIR)
         if(NOT EXISTS "${CUDA_INCLUDE_DIR}/cuda.h")
             message(FATAL_ERROR "Could not find CUDA headers. Set CUDA_INCLUDE_DIR or install CUDA Toolkit.")
         endif()
-        message(STATUS "Using CUDA headers from: ${CUDA_INCLUDE_DIR}")
     endif()
 endif()
+message(STATUS "Using CUDA headers from: ${CUDA_INCLUDE_DIR}")
 
 set(GENERATED_DIR ${CMAKE_CURRENT_BINARY_DIR}/generated)
 file(MAKE_DIRECTORY ${GENERATED_DIR})
@@ -89,7 +89,7 @@ set(PROTON_SOURCES
 )
 
 # Build the shared library
-add_library(parcagpucupti SHARED
+add_library(colacupti SHARED
     src/cupti.cpp
     src/pc_sampling.cpp
     src/correlation_filter.cpp
@@ -102,23 +102,23 @@ add_custom_target(probes_generated
     DEPENDS ${GENERATED_DIR}/probes.h
             ${CMAKE_CURRENT_BINARY_DIR}/probes.o
 )
-add_dependencies(parcagpucupti probes_generated)
-target_link_libraries(parcagpucupti ${CMAKE_CURRENT_BINARY_DIR}/probes.o)
+add_dependencies(colacupti probes_generated)
+target_link_libraries(colacupti ${CMAKE_CURRENT_BINARY_DIR}/probes.o)
 
 # Link against system libraries only (NOT libcupti - loaded dynamically by Proton)
-target_link_libraries(parcagpucupti
+target_link_libraries(colacupti
     dl
     pthread
 )
 
 # Set output directory
-set_target_properties(parcagpucupti PROPERTIES
+set_target_properties(colacupti PROPERTIES
     LIBRARY_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/lib"
-    OUTPUT_NAME "parcagpucupti"
+    OUTPUT_NAME "colacupti"
 )
 
 # Install target
-install(TARGETS parcagpucupti
+install(TARGETS colacupti
     LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR}/parcagpu
 )
 

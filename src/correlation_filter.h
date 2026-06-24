@@ -35,7 +35,8 @@ enum GraphCorrelationState {
 };
 
 // GraphCorrelationMap for graph launches (multiple kernels per launch)
-// Uses 2-slot state machine to detect when all kernels from a graph have arrived
+// Uses 2-slot state machine to detect when all kernels from a graph have
+// arrived
 struct GraphCorrelationEntry {
   uint8_t state[2];         // State for alternating cycles
   bool ever_seen_kernel;    // True once we've seen at least one kernel activity
