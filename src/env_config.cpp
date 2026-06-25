@@ -50,7 +50,7 @@ void validateEnvVars() {
           nameLen < sizeof(nameBuf) - 1 ? nameLen : sizeof(nameBuf) - 1;
       std::memcpy(nameBuf, *ep, copyLen);
 
-      DEBUG_PRINTF("[PARCAGPU] Warning: unrecognized env var '%s'\n", nameBuf);
+      DEBUG_PRINTF("[COLAGPU] Warning: unrecognized env var '%s'\n", nameBuf);
       fireError(0, nameBuf, "env_config: unrecognized variable");
     }
   }
@@ -62,7 +62,7 @@ void validateEnvVars() {
   if (val) {
     double rate = std::atof(val);
     if (rate <= 0) {
-      DEBUG_PRINTF("[PARCAGPU] Warning: COLAGPU_RATE_LIMIT=%s invalid "
+      DEBUG_PRINTF("[COLAGPU] Warning: COLAGPU_RATE_LIMIT=%s invalid "
                    "(must be > 0), using default\n",
                    val);
       fireError(0, val, "env_config: COLAGPU_RATE_LIMIT invalid");
@@ -73,7 +73,7 @@ void validateEnvVars() {
   if (val) {
     int factor = std::atoi(val);
     if (factor != 0 && (factor < 5 || factor > 31)) {
-      DEBUG_PRINTF("[PARCAGPU] Warning: COLAGPU_SAMPLING_FACTOR=%s out of "
+      DEBUG_PRINTF("[COLAGPU] Warning: COLAGPU_SAMPLING_FACTOR=%s out of "
                    "range [0, 5-31], using default\n",
                    val);
       fireError(0, val, "env_config: COLAGPU_SAMPLING_FACTOR out of range");
@@ -84,7 +84,7 @@ void validateEnvVars() {
   if (val) {
     double r = std::atof(val);
     if (r < 0.0) {
-      DEBUG_PRINTF("[PARCAGPU] Warning: COLAGPU_PC_SAMPLING_RATE=%s "
+      DEBUG_PRINTF("[COLAGPU] Warning: COLAGPU_PC_SAMPLING_RATE=%s "
                    "invalid (must be >= 0), using default\n",
                    val);
       fireError(0, val, "env_config: COLAGPU_PC_SAMPLING_RATE invalid");

@@ -205,7 +205,7 @@ uint32_t getGPUSamplingFrequency() {
       DEBUG_PRINTF("Using COLAGPU_SAMPLING_FACTOR=%u\n", samplingPeriod);
     } else if (factor != 0) {
       fprintf(stderr,
-              "[PARCAGPU] Warning: COLAGPU_SAMPLING_FACTOR=%d out of range "
+              "[COLAGPU] Warning: COLAGPU_SAMPLING_FACTOR=%d out of range "
               "[5,31], using default %u\n",
               factor, COLAGPU_DEFAULT_FREQUENCY);
     }

@@ -8,14 +8,19 @@ import (
 type platformType uint8
 
 const (
-	CupTI platformType = iota
+	CUPTI platformType = iota
+	MSPTI
 )
 
 func Open(platform platformType) (fs.File, error) {
+	var filename string
 	switch platform {
-	case CupTI:
-		return archive.Open(filepath.Join(archivePrefix, "libcolacupti.so"))
+	case CUPTI:
+		filename = `libcolacupti.so`
+	case MSPTI:
+		filename = `libcolamspti.so`
 	default:
 		return nil, fs.ErrNotExist
 	}
+	return archive.Open(filepath.Join(archivePrefix, filename))
 }

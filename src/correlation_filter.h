@@ -20,6 +20,9 @@ class CorrelationFilter {
 public:
   void insert(uint32_t correlation_id);
   bool check_and_remove(uint32_t correlation_id);
+  // Remove all entries with correlation_id < threshold.
+  // When threshold is 0, this is equivalent to clear().
+  void trim(uint32_t threshold);
   size_t size() const;
 
 private:

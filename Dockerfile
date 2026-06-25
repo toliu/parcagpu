@@ -31,6 +31,7 @@ COPY --from=cuda-headers /usr/local/cuda /usr/local/cuda
 COPY src /build/src
 COPY proton /build/proton
 COPY CMakeLists.txt /build/
+COPY ascend /build/ascend
 
 # Build the library (disable tests for Docker build)
 RUN mkdir -p build && \
@@ -40,8 +41,8 @@ RUN mkdir -p build && \
 
 # Export stage for extracting the library (used by Makefile and release binaries)
 FROM scratch AS export
-COPY --from=builder /build/build/lib/libcolacupti.so /
+COPY --from=builder /build/build/lib/libcola*.so /
 
 # Runtime image (for container registry)
 FROM busybox:latest AS runtime
-COPY --from=builder /build/build/lib/libcolacupti.so /usr/lib/libcolacupti.so
+COPY --from=builder /build/build/lib/libcola*.so /usr/lib/

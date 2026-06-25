@@ -24,6 +24,21 @@ bool CorrelationFilter::check_and_remove(uint32_t correlation_id) {
   return false;
 }
 
+void CorrelationFilter::trim(uint32_t threshold) {
+  std::lock_guard<std::mutex> lock(mutex_);
+  if (threshold == 0) {
+    set_.clear();
+    return;
+  }
+  for (auto it = set_.begin(); it != set_.end();) {
+    if (*it < threshold) {
+      it = set_.erase(it);
+    } else {
+      ++it;
+    }
+  }
+}
+
 size_t CorrelationFilter::size() const {
   std::lock_guard<std::mutex> lock(mutex_);
   return set_.size();

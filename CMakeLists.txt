@@ -20,6 +20,28 @@ set(CMAKE_C_FLAGS_DEBUG "${CMAKE_C_FLAGS_DEBUG} -g -O0")
 set(CMAKE_CXX_FLAGS_RELWITHDEBINFO "${CMAKE_CXX_FLAGS_RELWITHDEBINFO} -g -O2")
 set(CMAKE_C_FLAGS_RELWITHDEBINFO "${CMAKE_C_FLAGS_RELWITHDEBINFO} -g -O2")
 
+set(GENERATED_DIR ${CMAKE_CURRENT_BINARY_DIR}/generated)
+file(MAKE_DIRECTORY ${GENERATED_DIR})
+
+# Generate USDT probe header and object from probes.d
+find_program(DTRACE dtrace REQUIRED)
+
+add_custom_command(
+    OUTPUT ${GENERATED_DIR}/probes.h
+    COMMAND ${DTRACE} -h -s ${CMAKE_CURRENT_SOURCE_DIR}/src/probes.d
+                         -o ${GENERATED_DIR}/probes.h
+    DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/src/probes.d
+    COMMENT "Generating USDT probe header (probes.h)"
+)
+
+add_custom_command(
+    OUTPUT ${CMAKE_CURRENT_BINARY_DIR}/probes.o
+    COMMAND ${DTRACE} -G -s ${CMAKE_CURRENT_SOURCE_DIR}/src/probes.d
+                         -o ${CMAKE_CURRENT_BINARY_DIR}/probes.o
+    DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/src/probes.d
+    COMMENT "Generating USDT probe object (probes.o)"
+)
+
 # Set proton directory (git submodule or Docker build)
 if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/proton")
     set(PROTON_DIR "${CMAKE_CURRENT_SOURCE_DIR}/proton")
@@ -50,34 +72,13 @@ if(NOT DEFINED CUDA_INCLUDE_DIR)
 endif()
 message(STATUS "Using CUDA headers from: ${CUDA_INCLUDE_DIR}")
 
-set(GENERATED_DIR ${CMAKE_CURRENT_BINARY_DIR}/generated)
-file(MAKE_DIRECTORY ${GENERATED_DIR})
-
 # Include directories from proton
 include_directories(
     ${PROTON_DIR}/csrc/include
     ${PROTON_DIR}/common/include
     ${CUDA_INCLUDE_DIR}
     ${GENERATED_DIR}
-)
-
-# Generate USDT probe header and object from probes.d
-find_program(DTRACE dtrace REQUIRED)
-
-add_custom_command(
-    OUTPUT ${GENERATED_DIR}/probes.h
-    COMMAND ${DTRACE} -h -s ${CMAKE_CURRENT_SOURCE_DIR}/src/probes.d
-                         -o ${GENERATED_DIR}/probes.h
-    DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/src/probes.d
-    COMMENT "Generating USDT probe header (probes.h)"
-)
-
-add_custom_command(
-    OUTPUT ${CMAKE_CURRENT_BINARY_DIR}/probes.o
-    COMMAND ${DTRACE} -G -s ${CMAKE_CURRENT_SOURCE_DIR}/src/probes.d
-                         -o ${CMAKE_CURRENT_BINARY_DIR}/probes.o
-    DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/src/probes.d
-    COMMENT "Generating USDT probe object (probes.o)"
+    ${CMAKE_CURRENT_SOURCE_DIR}/ascend/include
 )
 
 # Collect proton driver source files we need
@@ -96,6 +97,10 @@ add_library(colacupti SHARED
     src/env_config.cpp
     ${PROTON_SOURCES}
 )
+add_library(colamspti SHARED
+    src/mspti.cpp
+    src/correlation_filter.cpp
+)
 
 # Wire USDT probe artifacts into the build
 add_custom_target(probes_generated
@@ -103,10 +108,16 @@ add_custom_target(probes_generated
             ${CMAKE_CURRENT_BINARY_DIR}/probes.o
 )
 add_dependencies(colacupti probes_generated)
+add_dependencies(colamspti probes_generated)
 target_link_libraries(colacupti ${CMAKE_CURRENT_BINARY_DIR}/probes.o)
+target_link_libraries(colamspti ${CMAKE_CURRENT_BINARY_DIR}/probes.o)
 
 # Link against system libraries only (NOT libcupti - loaded dynamically by Proton)
 target_link_libraries(colacupti
+    dl
+    pthread
+)
+target_link_libraries(colamspti
     dl
     pthread
 )
@@ -116,9 +127,16 @@ set_target_properties(colacupti PROPERTIES
     LIBRARY_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/lib"
     OUTPUT_NAME "colacupti"
 )
+set_target_properties(colamspti PROPERTIES
+    LIBRARY_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/lib"
+    OUTPUT_NAME "colamspti"
+)
 
 # Install target
 install(TARGETS colacupti
+    LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR}/parcagpu
+)
+install(TARGETS colamspti
     LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR}/parcagpu
 )
 

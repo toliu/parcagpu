@@ -163,7 +163,7 @@ static void controllerMaybeUpdate() {
   double oldP = g_pcController.probability.load(std::memory_order_relaxed);
   double newP = std::clamp(oldP * ratio, kPCProbMin, kPCProbMax);
   g_pcController.probability.store(newP, std::memory_order_relaxed);
-  DEBUG_PRINTF("[PARCAGPU] PC rate controller: observed=%.2f target=%.2f "
+  DEBUG_PRINTF("[COLAGPU] PC rate controller: observed=%.2f target=%.2f "
                "old_p=%.5f new_p=%.5f\n",
                observedRate, g_pcController.targetRate, oldP, newP);
 }
@@ -223,9 +223,7 @@ namespace parcagpu {
 // Simplified profiler using Proton's patterns
 class CuptiProfiler : public proton::Singleton<CuptiProfiler> {
 public:
-  CuptiProfiler() {
-    DEBUG_PRINTF("[PARCAGPU] Initializing ParcaGPUProfiler\n");
-  }
+  CuptiProfiler() { DEBUG_PRINTF("[COLAGPU] Initializing ParcaGPUProfiler\n"); }
 
   ~CuptiProfiler() { cleanup(); }
 
@@ -234,22 +232,22 @@ public:
       return true; // Already initialized
     }
 
-    DEBUG_PRINTF("[PARCAGPU] Starting initialization\n");
+    DEBUG_PRINTF("[COLAGPU] Starting initialization\n");
 
     // Check if PC sampling is supported
     pcSamplingEnabled = parcagpu::PCSampling::isSupported();
     if (pcSamplingEnabled) {
-      DEBUG_PRINTF("[PARCAGPU] PC sampling enabled (serialized mode)\n");
+      DEBUG_PRINTF("[COLAGPU] PC sampling enabled (serialized mode)\n");
     } else {
       DEBUG_PRINTF(
-          "[PARCAGPU] PC sampling disabled, using kernel activity only\n");
+          "[COLAGPU] PC sampling disabled, using kernel activity only\n");
     }
 
     // Subscribe to callbacks
     auto result =
         proton::cupti::subscribe<true>(&subscriber, callbackHandler, nullptr);
     if (result != CUPTI_SUCCESS) {
-      DEBUG_PRINTF("[PARCAGPU] Failed to subscribe to callbacks: error %d\n",
+      DEBUG_PRINTF("[COLAGPU] Failed to subscribe to callbacks: error %d\n",
                    result);
       return false;
     }
@@ -268,7 +266,7 @@ public:
                                                             completeBuffer);
     if (result != CUPTI_SUCCESS) {
       DEBUG_PRINTF(
-          "[PARCAGPU] Failed to register activity callbacks: error %d\n",
+          "[COLAGPU] Failed to register activity callbacks: error %d\n",
           result);
       return false;
     }
@@ -278,13 +276,13 @@ public:
         CUPTI_ACTIVITY_KIND_CONCURRENT_KERNEL);
     if (result != CUPTI_SUCCESS) {
       DEBUG_PRINTF(
-          "[PARCAGPU] Failed to enable concurrent kernel activity: error %d\n",
+          "[COLAGPU] Failed to enable concurrent kernel activity: error %d\n",
           result);
     } else {
-      DEBUG_PRINTF("[PARCAGPU] Enabled CONCURRENT_KERNEL activity\n");
+      DEBUG_PRINTF("[COLAGPU] Enabled CONCURRENT_KERNEL activity\n");
     }
 
-    DEBUG_PRINTF("[PARCAGPU] Successfully initialized CUPTI callbacks\n");
+    DEBUG_PRINTF("[COLAGPU] Successfully initialized CUPTI callbacks\n");
     return true;
   }
 
@@ -293,7 +291,7 @@ public:
       return; // Already cleaned up
     }
 
-    DEBUG_PRINTF("[PARCAGPU] Cleanup started\n");
+    DEBUG_PRINTF("[COLAGPU] Cleanup started\n");
 
     // PC sampling data is drained in finalize() during CONTEXT_DESTROY_STARTING
     // when the CUDA context is still valid. By the time cleanup() runs, the
@@ -314,24 +312,24 @@ public:
     if (auto r = proton::cupti::activityFlushAll<false>(
             CUPTI_ACTIVITY_FLAG_FLUSH_FORCED);
         r != CUPTI_SUCCESS) {
-      DEBUG_PRINTF("[PARCAGPU] activityFlushAll failed: %d\n", r);
+      DEBUG_PRINTF("[COLAGPU] activityFlushAll failed: %d\n", r);
     }
 
     if (auto r = proton::cupti::activityDisable<false>(
             CUPTI_ACTIVITY_KIND_CONCURRENT_KERNEL);
         r != CUPTI_SUCCESS) {
-      DEBUG_PRINTF("[PARCAGPU] activityDisable failed: %d\n", r);
+      DEBUG_PRINTF("[COLAGPU] activityDisable failed: %d\n", r);
     }
 
     if (subscriber) {
       if (auto r = proton::cupti::unsubscribe<false>(subscriber);
           r != CUPTI_SUCCESS) {
-        DEBUG_PRINTF("[PARCAGPU] unsubscribe failed: %d\n", r);
+        DEBUG_PRINTF("[COLAGPU] unsubscribe failed: %d\n", r);
       }
       subscriber = nullptr;
     }
 
-    DEBUG_PRINTF("[PARCAGPU] Cleanup completed\n");
+    DEBUG_PRINTF("[COLAGPU] Cleanup completed\n");
   }
 
 private:
@@ -363,7 +361,7 @@ private:
     }
     *buffer = static_cast<uint8_t *>(aligned_alloc(AlignSize, BufferSize));
     if (*buffer == nullptr) {
-      DEBUG_PRINTF("[PARCAGPU] ERROR: aligned_alloc failed\n");
+      DEBUG_PRINTF("[COLAGPU] ERROR: aligned_alloc failed\n");
       return;
     }
     *bufferSize = BufferSize;
@@ -385,7 +383,7 @@ private:
     uint32_t batchCount = 0;
 
     DEBUG_PRINTF(
-        "[PARCAGPU] completeBuffer called: ctx=%p buffer=%p validSize=%zu\n",
+        "[COLAGPU] completeBuffer called: ctx=%p buffer=%p validSize=%zu\n",
         ctx, buffer, validSize);
 
     // Start a new buffer cycle for graph correlation tracking
@@ -398,7 +396,7 @@ private:
       if (result == CUPTI_ERROR_MAX_LIMIT_REACHED) {
         break;
       } else if (result != CUPTI_SUCCESS) {
-        DEBUG_PRINTF("[PARCAGPU] Error reading activity record: error %d\n",
+        DEBUG_PRINTF("[COLAGPU] Error reading activity record: error %d\n",
                      result);
         break;
       }
@@ -422,7 +420,7 @@ private:
 
         if (!shouldEmit) {
           filteredCount++;
-          DEBUG_PRINTF("[PARCAGPU] Filtered kernel activity: correlationId=%u "
+          DEBUG_PRINTF("[COLAGPU] Filtered kernel activity: correlationId=%u "
                        "graphId=%u (not in filter)\n",
                        k->correlationId, k->graphId);
           // Skip both KERNEL_EXECUTED and activity_batch push. Without this,
@@ -434,7 +432,7 @@ private:
           break;
         }
 
-        DEBUG_PRINTF("[PARCAGPU] Kernel activity: graphId=%u graphNodeId=%lu "
+        DEBUG_PRINTF("[COLAGPU] Kernel activity: graphId=%u graphNodeId=%lu "
                      "name=%s, correlationId=%u, deviceId=%u, "
                      "streamId=%u, start=%lu, end=%lu, duration=%lu ns\n",
                      k->graphId, k->graphNodeId, k->name, k->correlationId,
@@ -459,7 +457,7 @@ private:
         break;
       }
       default:
-        DEBUG_PRINTF("[PARCAGPU] Activity record %d: kind=%d\n", recordCount,
+        DEBUG_PRINTF("[COLAGPU] Activity record %d: kind=%d\n", recordCount,
                      record->kind);
         break;
       }
@@ -473,7 +471,7 @@ private:
     // End cycle - cleanup completed graph entries
     g_graphCorrelationMap.cycle_end();
 
-    DEBUG_PRINTF("[PARCAGPU] Processed %d activity records (%d filtered) from "
+    DEBUG_PRINTF("[COLAGPU] Processed %d activity records (%d filtered) from "
                  "buffer %p\n",
                  recordCount, filteredCount, buffer);
 
@@ -508,7 +506,7 @@ private:
               static_cast<const CUpti_ModuleResourceData *>(
                   resData->resourceDescriptor);
           if (modData && modData->pCubin && modData->cubinSize > 0) {
-            DEBUG_PRINTF("[PARCAGPU] Module loaded: cubin=%p size=%zu\n",
+            DEBUG_PRINTF("[COLAGPU] Module loaded: cubin=%p size=%zu\n",
                          modData->pCubin, modData->cubinSize);
             profiler.pcSampling.loadModule(modData->pCubin, modData->cubinSize);
           }
@@ -519,7 +517,7 @@ private:
               static_cast<const CUpti_ModuleResourceData *>(
                   resData->resourceDescriptor);
           if (modData && modData->pCubin && modData->cubinSize > 0) {
-            DEBUG_PRINTF("[PARCAGPU] Module unloading: cubin=%p size=%zu\n",
+            DEBUG_PRINTF("[COLAGPU] Module unloading: cubin=%p size=%zu\n",
                          modData->pCubin, modData->cubinSize);
             profiler.pcSampling.unloadModule(modData->pCubin,
                                              modData->cubinSize);
@@ -528,13 +526,13 @@ private:
         }
         case CUPTI_CBID_RESOURCE_CONTEXT_CREATED: {
           CUcontext ctx = resData->context;
-          DEBUG_PRINTF("[PARCAGPU] Context created: %p\n", ctx);
+          DEBUG_PRINTF("[COLAGPU] Context created: %p\n", ctx);
           profiler.pcSampling.initialize(ctx);
           break;
         }
         case CUPTI_CBID_RESOURCE_CONTEXT_DESTROY_STARTING: {
           CUcontext ctx = resData->context;
-          DEBUG_PRINTF("[PARCAGPU] Context destroying: %p\n", ctx);
+          DEBUG_PRINTF("[COLAGPU] Context destroying: %p\n", ctx);
           profiler.pcSampling.finalize(ctx);
           break;
         }
@@ -623,20 +621,20 @@ private:
           // Skip if this driver call is under a runtime call (same correlation
           // ID)
           if (correlationId == runtimeEnterCorrelationId) {
-            DEBUG_PRINTF("[PARCAGPU] Skipping driver EXIT correlationId=%u - "
+            DEBUG_PRINTF("[COLAGPU] Skipping driver EXIT correlationId=%u - "
                          "runtime will handle\n",
                          correlationId);
             return;
           }
           // Pure driver call (no runtime wrapper) - use negative cbid
           signedCbid = -(int)cbid;
-          DEBUG_PRINTF("[PARCAGPU] Driver API callback: cbid=%d, "
+          DEBUG_PRINTF("[COLAGPU] Driver API callback: cbid=%d, "
                        "correlationId=%u, func=%s\n",
                        cbid, correlationId, name);
         } else if (domain == CUPTI_CB_DOMAIN_RUNTIME_API) {
           signedCbid = (int)cbid;
           runtimeEnterCorrelationId = 0; // Clear after use
-          DEBUG_PRINTF("[PARCAGPU] Runtime API callback: cbid=%d, "
+          DEBUG_PRINTF("[COLAGPU] Runtime API callback: cbid=%d, "
                        "correlationId=%u, func=%s\n",
                        cbid, correlationId, name);
         } else {
@@ -665,7 +663,7 @@ private:
         // PC samples can be matched with CPU stacks on the agent side).
         if (!isGraphLaunch && !g_pcSamplingState.active) {
           if (!callbackLimiter.tryAcquire()) {
-            DEBUG_PRINTF("[PARCAGPU] Rate limited: skipping probe for "
+            DEBUG_PRINTF("[COLAGPU] Rate limited: skipping probe for "
                          "correlationId=%u\n",
                          correlationId);
             return;
@@ -681,30 +679,30 @@ private:
         // later
         if (isGraphLaunch) {
           g_graphCorrelationMap.insert(correlationId);
-          DEBUG_PRINTF("[PARCAGPU] Inserted correlationId=%u into graph map\n",
+          DEBUG_PRINTF("[COLAGPU] Inserted correlationId=%u into graph map\n",
                        correlationId);
         } else {
           g_correlationFilter.insert(correlationId);
           DEBUG_PRINTF(
-              "[PARCAGPU] Inserted correlationId=%u into correlation filter\n",
+              "[COLAGPU] Inserted correlationId=%u into correlation filter\n",
               correlationId);
         }
 
         // Flush if too many events pile up
         if (profiler.outstandingEvents > 3000) {
-          DEBUG_PRINTF("[PARCAGPU] Flushing: outstandingEvents=%zu\n",
+          DEBUG_PRINTF("[COLAGPU] Flushing: outstandingEvents=%zu\n",
                        profiler.outstandingEvents);
           if (auto r = proton::cupti::activityFlushAll<false>(0);
               r != CUPTI_SUCCESS) {
-            DEBUG_PRINTF("[PARCAGPU] activityFlushAll failed: %d\n", r);
+            DEBUG_PRINTF("[COLAGPU] activityFlushAll failed: %d\n", r);
           }
           profiler.outstandingEvents = 0;
         }
       }
     } catch (const std::exception &e) {
-      fprintf(stderr, "[PARCAGPU] callbackHandler caught: %s\n", e.what());
+      fprintf(stderr, "[COLAGPU] callbackHandler caught: %s\n", e.what());
     } catch (...) {
-      fprintf(stderr, "[PARCAGPU] callbackHandler caught unknown exception\n");
+      fprintf(stderr, "[COLAGPU] callbackHandler caught unknown exception\n");
     }
   }
 };
@@ -715,7 +713,7 @@ private:
 // Called from the CUDA driver, which wasn't built with C++ EH; a throw out
 // of here would abort the host process. Catch everything at the boundary.
 extern "C" int InitializeInjection(void) {
-  DEBUG_PRINTF("[PARCAGPU] InitializeInjection called\n");
+  DEBUG_PRINTF("[COLAGPU] InitializeInjection called\n");
   try {
     auto &profiler = parcagpu::CuptiProfiler::instance();
     if (!profiler.initialize()) {
@@ -725,18 +723,17 @@ extern "C" int InitializeInjection(void) {
       try {
         parcagpu::CuptiProfiler::instance().cleanup();
       } catch (const std::exception &e) {
-        fprintf(stderr, "[PARCAGPU] cleanup caught: %s\n", e.what());
+        fprintf(stderr, "[COLAGPU] cleanup caught: %s\n", e.what());
       } catch (...) {
-        fprintf(stderr, "[PARCAGPU] cleanup caught unknown exception\n");
+        fprintf(stderr, "[COLAGPU] cleanup caught unknown exception\n");
       }
     });
     return 1;
   } catch (const std::exception &e) {
-    fprintf(stderr, "[PARCAGPU] InitializeInjection caught: %s\n", e.what());
+    fprintf(stderr, "[COLAGPU] InitializeInjection caught: %s\n", e.what());
     return 0;
   } catch (...) {
-    fprintf(stderr,
-            "[PARCAGPU] InitializeInjection caught unknown exception\n");
+    fprintf(stderr, "[COLAGPU] InitializeInjection caught unknown exception\n");
     return 0;
   }
 }

@@ -1,13 +1,13 @@
 .PHONY: all clean test cross docker-push docker-test-build docker-test-run format local debug generate bpf-test microbenchmarks test-multi test-pc-real test-pc-mock
 
-LIB_NAME = libcolacupti.so
+# LIB_NAME = libcolacupti.so
 
 # Default target: build for both architectures
 all: build-amd64 build-arm64
 
 # Pattern rule: build-<arch> (e.g., build-amd64, build-arm64)
 build-%:
-	@echo "=== Building $(LIB_NAME) for $* with Docker ==="
+	@echo "=== Building for $* with Docker ==="
 	@mkdir -p /tmp/parcagpu-build-$*
 	@docker buildx create --name parcagpu-builder --use --bootstrap \
 		--driver-opt "env.HTTP_PROXY=http://proxy.colasoft.cn:1282" \
@@ -18,8 +18,8 @@ build-%:
 		--output type=local,dest=/tmp/parcagpu-build-$* \
 		--platform linux/$* .
 	@mkdir -p build/$*
-	@cp /tmp/parcagpu-build-$*/$(LIB_NAME) build/$*/
-	@echo "$* library built: build/$*/$(LIB_NAME)"
+	@cp /tmp/parcagpu-build-$*/libcola*.so build/$*/
+	@echo "$* library built: build/$*/"
 
 # Build runtime container image for both architectures
 # Multi-platform images stay in buildx cache. Use docker-push to push to registry.
@@ -37,14 +37,14 @@ local:
 	@echo "=== Building locally with CMake (RelWithDebInfo) ==="
 	@cmake -B build-local -S . -DCMAKE_BUILD_TYPE=RelWithDebInfo
 	@cmake --build build-local
-	@echo "Local build complete: build-local/lib/$(LIB_NAME)"
+	@echo "Local build complete: build-local/lib/"
 
 # Debug build with CMake (full debug, no optimizations)
 debug:
 	@echo "=== Building debug version with CMake ==="
 	@cmake -B build-local -S . -DCMAKE_BUILD_TYPE=Debug
 	@cmake --build build-local
-	@echo "Debug build complete: build-local/lib/$(LIB_NAME)"
+	@echo "Debug build complete: build-local/lib/"
 
 # Run local tests
 test: local
