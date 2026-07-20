@@ -9,9 +9,7 @@
 #include <time.h>
 #include <unistd.h>
 
-// USDT probes — must come before any header that might include <sys/sdt.h>,
-// so that _SDT_HAS_SEMAPHORES is defined first.
-#include "probes.h"
+#include "activity.h"
 
 // Include proton headers
 #include "Driver/GPU/CuptiApi.h"
@@ -209,14 +207,7 @@ void init_debug() {
 
 // Out-of-line USDT probe site for activity batches.
 // Single call site ensures one probe location in the ELF .note.stapsdt section.
-static constexpr int ACTIVITY_BATCH_SIZE = 128;
-
 } // namespace parcagpu
-
-__attribute__((noinline)) void parcagpuActivityBatch(const void **ptrs,
-                                                     uint32_t count) {
-  COLAGPU_ACTIVITY_BATCH(ptrs, count);
-}
 
 namespace parcagpu {
 
@@ -271,15 +262,21 @@ public:
       return false;
     }
 
-    // Enable kernel activity recording
-    result = proton::cupti::activityEnable<true>(
-        CUPTI_ACTIVITY_KIND_CONCURRENT_KERNEL);
-    if (result != CUPTI_SUCCESS) {
-      DEBUG_PRINTF(
-          "[COLAGPU] Failed to enable concurrent kernel activity: error %d\n",
-          result);
-    } else {
-      DEBUG_PRINTF("[COLAGPU] Enabled CONCURRENT_KERNEL activity\n");
+    // Enable activity kinds via loop — uses <false> (non-throwing) so one
+    // failure doesn't abort the rest.
+    std::map<CUpti_ActivityKind, std::string> activities = {
+        {CUPTI_ACTIVITY_KIND_CONCURRENT_KERNEL, "CONCURRENT_KERNEL"},
+        {CUPTI_ACTIVITY_KIND_DRIVER, "DRIVER"},
+        {CUPTI_ACTIVITY_KIND_RUNTIME, "RUNTIME"},
+    };
+    for (const auto &[kind, name] : activities) {
+      if (auto r = proton::cupti::activityEnable<false>(kind);
+          r != CUPTI_SUCCESS) {
+        DEBUG_PRINTF("[COLAGPU] Failed to enable %s activity: error %d\n",
+                     name.c_str(), r);
+      } else {
+        DEBUG_PRINTF("[COLAGPU] Enabled %s activity\n", name.c_str());
+      }
     }
 
     DEBUG_PRINTF("[COLAGPU] Successfully initialized CUPTI callbacks\n");
@@ -315,10 +312,14 @@ public:
       DEBUG_PRINTF("[COLAGPU] activityFlushAll failed: %d\n", r);
     }
 
-    if (auto r = proton::cupti::activityDisable<false>(
-            CUPTI_ACTIVITY_KIND_CONCURRENT_KERNEL);
-        r != CUPTI_SUCCESS) {
-      DEBUG_PRINTF("[COLAGPU] activityDisable failed: %d\n", r);
+    // Disable all activity kinds (mirrors the enable loop above)
+    for (CUpti_ActivityKind kind :
+         {CUPTI_ACTIVITY_KIND_CONCURRENT_KERNEL, CUPTI_ACTIVITY_KIND_DRIVER,
+          CUPTI_ACTIVITY_KIND_RUNTIME}) {
+      if (auto r = proton::cupti::activityDisable<false>(kind);
+          r != CUPTI_SUCCESS) {
+        DEBUG_PRINTF("[COLAGPU] activityDisable(%d) failed: %d\n", kind, r);
+      }
     }
 
     if (subscriber) {
@@ -376,10 +377,11 @@ private:
     int recordCount = 0;
     int filteredCount = 0;
 
-    // Batch probe: collect pointers to activity records and pass them to
-    // BPF/USDT every ACTIVITY_BATCH_SIZE records. Stack-allocated array
-    // of pointers — no heap allocation, no copying, version-independent.
-    const void *batchPtrs[ACTIVITY_BATCH_SIZE];
+    // Batch probe: collect ActivityEvent structs and pass them to
+    // BPF/USDT every ACTIVITY_BATCH_SIZE records. Stack-allocated — no heap
+    // allocation. The parcagpuActivityBatch function handles both individual
+    // KERNEL_EXECUTED probes and the batch ACTIVITY_BATCH probe.
+    ActivityEvent batchEvents[ACTIVITY_BATCH_SIZE];
     uint32_t batchCount = 0;
 
     DEBUG_PRINTF(
@@ -402,6 +404,9 @@ private:
       }
 
       recordCount++;
+
+      ActivityEvent &evt = batchEvents[batchCount++];
+      memset(&evt, 0, sizeof(evt));
       switch (record->kind) {
       case CUPTI_ACTIVITY_KIND_CONCURRENT_KERNEL:
       case CUPTI_ACTIVITY_KIND_KERNEL: {
@@ -439,33 +444,68 @@ private:
                      k->deviceId, k->streamId, k->start, k->end,
                      k->end - k->start);
 
-        // Emit USDT probe for kernel execution
-        COLAGPU_KERNEL_EXECUTED(k->start, k->end, k->correlationId, k->deviceId,
-                                k->streamId, k->graphId, k->graphNodeId,
-                                k->name);
-
-        // Collect pointer for batch probe — only for kernel records that
-        // passed the correlation filter. eBPF's activity_batch handler only
-        // emits kernel_events for KERNEL/CONCURRENT_KERNEL kinds anyway
-        // (cuda.ebpf.c kind check), so excluding non-kernel kinds here saves
-        // ringbuf bandwidth without losing any consumed data.
-        batchPtrs[batchCount++] = record;
-        if (batchCount >= ACTIVITY_BATCH_SIZE) {
-          parcagpuActivityBatch(batchPtrs, batchCount);
-          batchCount = 0;
-        }
+        // Populate ActivityEvent for batch processing.
+        // Only for kernel records that passed the correlation filter.
+        // parcagpuActivityBatch handles both individual KERNEL_EXECUTED probes
+        // and the batch ACTIVITY_BATCH probe in one call.
+        evt.kind = ACTIVITY_KIND_KERNEL;
+        evt.start = k->start;
+        evt.end = k->end;
+        evt.correlationId = k->correlationId;
+        evt.deviceId = k->deviceId;
+        evt.streamId = k->streamId;
+        evt.graphId = k->graphId;
+        evt.graphNodeId = k->graphNodeId;
+        evt.name = k->name;
         break;
       }
-      default:
+      case CUPTI_ACTIVITY_KIND_RUNTIME:
+      case CUPTI_ACTIVITY_KIND_DRIVER: {
+        CUpti_ActivityAPI *api = reinterpret_cast<CUpti_ActivityAPI *>(record);
+        bool is_launch;
+        if (record->kind == CUPTI_ACTIVITY_KIND_RUNTIME) {
+          switch (api->cbid) {
+          case CUPTI_RUNTIME_TRACE_CBID_cudaLaunchKernel_v7000:
+          case CUPTI_RUNTIME_TRACE_CBID_cudaLaunchKernelExC_ptsz_v11060:
+          case CUPTI_RUNTIME_TRACE_CBID_cudaLaunchKernelExC_v11060:
+          case CUPTI_RUNTIME_TRACE_CBID_cudaLaunchKernel_ptsz_v7000:
+            is_launch = true;
+            break;
+          default:
+            is_launch = false;
+            break;
+          }
+        } else {
+          is_launch = proton::isLaunch(api->cbid);
+        }
+        if (!is_launch) {
+          batchCount--;
+          break;
+        }
+        evt.kind = ACTIVITY_KIND_HOST_API;
+        evt.start = api->start;
+        evt.end = api->end;
+        // evt.streamId = api->cbid;
+        evt.correlationId = api->correlationId;
+        break;
+      }
+      default: {
+        batchCount--;
         DEBUG_PRINTF("[COLAGPU] Activity record %d: kind=%d\n", recordCount,
                      record->kind);
         break;
+      }
+      }
+
+      if (batchCount >= ACTIVITY_BATCH_SIZE) {
+        parcagpuActivityBatch(batchEvents, batchCount);
+        batchCount = 0;
       }
     }
 
     // Flush remaining batch
     if (batchCount > 0) {
-      parcagpuActivityBatch(batchPtrs, batchCount);
+      parcagpuActivityBatch(batchEvents, batchCount);
     }
 
     // End cycle - cleanup completed graph entries
@@ -490,8 +530,8 @@ private:
     // whole body as untrusted and swallow exceptions at the boundary.
     try {
       auto &profiler = CuptiProfiler::instance();
-
-      if (domain == CUPTI_CB_DOMAIN_RESOURCE) {
+      switch (domain) {
+      case CUPTI_CB_DOMAIN_RESOURCE: {
         // Handle resource callbacks for PC sampling (only if enabled)
         if (!profiler.pcSamplingEnabled) {
           return;
@@ -539,7 +579,10 @@ private:
         default:
           break;
         }
-      } else {
+        break;
+      }
+      case CUPTI_CB_DOMAIN_DRIVER_API:
+      case CUPTI_CB_DOMAIN_RUNTIME_API: {
         // Handle both Runtime and Driver API callbacks
         const CUpti_CallbackData *cbdata =
             static_cast<const CUpti_CallbackData *>(cbdata_void);
@@ -698,6 +741,10 @@ private:
           }
           profiler.outstandingEvents = 0;
         }
+        break;
+      }
+      default:
+        break;
       }
     } catch (const std::exception &e) {
       fprintf(stderr, "[COLAGPU] callbackHandler caught: %s\n", e.what());
