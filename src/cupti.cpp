@@ -8,6 +8,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <dlfcn.h>
+#include <sys/syscall.h>
 #include <time.h>
 #include <unistd.h>
 
@@ -28,6 +29,24 @@ constexpr std::array<CUpti_CallbackId, 4> kSynchronizeCallbacks = {
     CUPTI_DRIVER_TRACE_CBID_cuEventSynchronize,
     CUPTI_DRIVER_TRACE_CBID_cuStreamSynchronize_ptsz};
 
+// Runtime memcpy CBIDs — enable so the callback handler can capture pid/tid
+// on every cudaMemcpy/cudaMemcpyAsync EXIT, then bridge them to activity
+// records via MemcpyCorrelationMap. Without these callbacks firing, the map
+// is never populated and pid/tid in memcpy events stay 0.
+constexpr std::array<CUpti_CallbackId, 4> kMemcpyRuntimeCallbacks = {
+    CUPTI_RUNTIME_TRACE_CBID_cudaMemcpy_v3020,
+    CUPTI_RUNTIME_TRACE_CBID_cudaMemcpy_ptds_v7000,
+    CUPTI_RUNTIME_TRACE_CBID_cudaMemcpyAsync_v3020,
+    CUPTI_RUNTIME_TRACE_CBID_cudaMemcpyAsync_ptsz_v7000};
+
+static bool isMemcpyRuntimeCbid(CUpti_CallbackId cbid) {
+  for (auto id : kMemcpyRuntimeCallbacks) {
+    if (id == cbid)
+      return true;
+  }
+  return false;
+}
+
 namespace parcagpu {
 
 // Debug logging control
@@ -36,6 +55,7 @@ bool debug_enabled = false;
 // Global correlation tracking instances
 static CorrelationFilter g_correlationFilter;
 static GraphCorrelationMap g_graphCorrelationMap;
+static MemcpyCorrelationMap g_memcpyCorrelationMap;
 static std::atomic<uint32_t> g_bufferCycle{0};
 
 // Thread-local tracking: store correlation ID from runtime ENTER
@@ -273,6 +293,21 @@ public:
       }
     }
 
+    // Enable runtime memcpy callbacks so pid/tid can be captured for
+    // memcpy activity record correlation.
+    for (auto cbId : kMemcpyRuntimeCallbacks) {
+      result = proton::cupti::enableCallback<true>(
+          /*enable=*/1, subscriber, CUPTI_CB_DOMAIN_RUNTIME_API, cbId);
+      if (result != CUPTI_SUCCESS) {
+        DEBUG_PRINTF(
+            "[COLAGPU] Failed to enable memcpy callback %d: error %d\n", cbId,
+            result);
+        return false;
+      } else {
+        DEBUG_PRINTF("[COLAGPU] enable runtime memcpy callback %d\n", cbId);
+      }
+    }
+
     // Register activity buffer callbacks (using Proton's pattern)
     result = proton::cupti::activityRegisterCallbacks<true>(allocBuffer,
                                                             completeBuffer);
@@ -289,6 +324,8 @@ public:
         {CUPTI_ACTIVITY_KIND_CONCURRENT_KERNEL, "CONCURRENT_KERNEL"},
         {CUPTI_ACTIVITY_KIND_DRIVER, "DRIVER"},
         {CUPTI_ACTIVITY_KIND_RUNTIME, "RUNTIME"},
+        {CUPTI_ACTIVITY_KIND_MEMCPY, "MEMCPY"},
+        {CUPTI_ACTIVITY_KIND_MEMCPY2, "MEMCPY2(P2P)"},
     };
     for (const auto &[kind, name] : activities) {
       if (auto r = proton::cupti::activityEnable<false>(kind);
@@ -324,6 +361,10 @@ public:
         proton::cupti::enableCallback<false>(/*enable=*/0, subscriber,
                                              CUPTI_CB_DOMAIN_DRIVER_API, cbId);
       }
+      for (auto cbId : kMemcpyRuntimeCallbacks) {
+        proton::cupti::enableCallback<false>(/*enable=*/0, subscriber,
+                                             CUPTI_CB_DOMAIN_RUNTIME_API, cbId);
+      }
       if (pcSamplingEnabled) {
         proton::setResourceCallbacks(subscriber, /*enable=*/false);
       }
@@ -341,7 +382,8 @@ public:
     // Disable all activity kinds (mirrors the enable loop above)
     for (CUpti_ActivityKind kind :
          {CUPTI_ACTIVITY_KIND_CONCURRENT_KERNEL, CUPTI_ACTIVITY_KIND_DRIVER,
-          CUPTI_ACTIVITY_KIND_RUNTIME}) {
+          CUPTI_ACTIVITY_KIND_RUNTIME, CUPTI_ACTIVITY_KIND_MEMCPY,
+          CUPTI_ACTIVITY_KIND_MEMCPY2}) {
       if (auto r = proton::cupti::activityDisable<false>(kind);
           r != CUPTI_SUCCESS) {
         DEBUG_PRINTF("[COLAGPU] activityDisable(%d) failed: %d\n", kind, r);
@@ -513,6 +555,72 @@ private:
         evt.end = api->end;
         // evt.streamId = api->cbid;
         evt.correlationId = api->correlationId;
+        break;
+      }
+      case CUPTI_ACTIVITY_KIND_MEMCPY: {
+        // Standard memory copy (H2D, D2H, D2D, H2A, A2H, etc.)
+        auto *m = reinterpret_cast<CUpti_ActivityMemcpy6 *>(record);
+
+        // Look up pid/tid via correlation ID. For runtime-launched memcpy
+        // (cudaMemcpy*), the runtimeCorrelationId matches what we stored in
+        // the callback handler. For driver-only memcpy (cuMemcpy*), the
+        // correlationId matches.
+        uint32_t lookupId = m->runtimeCorrelationId != 0
+                                ? m->runtimeCorrelationId
+                                : m->correlationId;
+        MemcpyCorrelationMap::Info info{};
+        bool found = g_memcpyCorrelationMap.check_and_remove(lookupId, &info);
+
+        DEBUG_PRINTF(
+            "[COLAGPU] Memcpy activity: copyKind=%u bytes=%lu "
+            "deviceId=%u streamId=%u start=%lu end=%lu duration=%lu ns "
+            "flags=%u correlationId=%u runtimeCorrId=%u pid=%u tid=%u\n",
+            m->copyKind, m->bytes, m->deviceId, m->streamId, m->start, m->end,
+            m->end - m->start, m->flags, m->correlationId,
+            m->runtimeCorrelationId, found ? info.pid : 0,
+            found ? info.tid : 0);
+
+        evt.kind = ACTIVITY_KIND_MEMCPY;
+        evt.start = m->start;
+        evt.end = m->end;
+        evt.correlationId = m->correlationId;
+        evt.deviceId = m->deviceId;
+        evt.streamId = m->streamId;
+        evt.bytes = m->bytes;
+        evt.copyKind = m->copyKind;
+        evt.sync = (m->flags & CUPTI_ACTIVITY_FLAG_MEMCPY_ASYNC) ? 0 : 1;
+        evt.pid = found ? info.pid : 0;
+        evt.tid = found ? info.tid : 0;
+        break;
+      }
+      case CUPTI_ACTIVITY_KIND_MEMCPY2: {
+        // Peer-to-peer memory copy
+        auto *m = reinterpret_cast<CUpti_ActivityMemcpyPtoP4 *>(record);
+
+        MemcpyCorrelationMap::Info info{};
+        bool found =
+            g_memcpyCorrelationMap.check_and_remove(m->correlationId, &info);
+
+        DEBUG_PRINTF("[COLAGPU] Memcpy P2P activity: copyKind=%u bytes=%lu "
+                     "deviceId=%u srcDeviceId=%u dstDeviceId=%u streamId=%u "
+                     "start=%lu end=%lu duration=%lu ns flags=%u "
+                     "correlationId=%u pid=%u tid=%u\n",
+                     m->copyKind, m->bytes, m->deviceId, m->srcDeviceId,
+                     m->dstDeviceId, m->streamId, m->start, m->end,
+                     m->end - m->start, m->flags, m->correlationId,
+                     found ? info.pid : 0, found ? info.tid : 0);
+
+        evt.kind = ACTIVITY_KIND_MEMCPY;
+        evt.start = m->start;
+        evt.end = m->end;
+        evt.correlationId = m->correlationId;
+        evt.deviceId = m->deviceId;
+        evt.streamId = m->streamId;
+        evt.bytes = m->bytes;
+        evt.copyKind = m->copyKind;
+        evt.sync = (m->flags & CUPTI_ACTIVITY_FLAG_MEMCPY_ASYNC) ? 0 : 1;
+        evt.pid = found ? info.pid : 0;
+        evt.tid = found ? info.tid : 0;
         break;
       }
       default: {
@@ -743,6 +851,21 @@ private:
           DEBUG_PRINTF("[COLAGPU] Runtime API callback: cbid=%d, "
                        "correlationId=%u, func=%s\n",
                        cbid, correlationId, name);
+
+          // Capture pid/tid for memcpy activity correlation: only runtime
+          // cudaMemcpy/cudaMemcpyAsync callbacks need this; kernel launches
+          // and other APIs are irrelevant.
+          if (isMemcpyRuntimeCbid(cbid)) {
+            g_memcpyCorrelationMap.insert(correlationId, (uint32_t)getpid(),
+                                          (uint32_t)syscall(SYS_gettid));
+            // Prune stale entries to bound memory.
+            if (g_memcpyCorrelationMap.size() > 10000) {
+              uint32_t threshold =
+                  correlationId > 5000 ? correlationId - 5000 : 0;
+              g_memcpyCorrelationMap.trim(threshold);
+            }
+            return;
+          }
         } else {
           return;
         }

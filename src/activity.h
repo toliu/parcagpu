@@ -12,6 +12,7 @@ static constexpr int ACTIVITY_BATCH_SIZE = 128;
 typedef enum {
   ACTIVITY_KIND_KERNEL = 1,
   ACTIVITY_KIND_HOST_API = 2,
+  ACTIVITY_KIND_MEMCPY = 3,
 } ActivityKind;
 
 typedef struct PACKED_ALIGNMENT {
@@ -24,6 +25,12 @@ typedef struct PACKED_ALIGNMENT {
   uint32_t graphId;
   uint64_t graphNodeId;
   const char *name;
+  // memcpy-specific fields (zero/ignored for non-memcpy events)
+  uint64_t bytes;
+  uint32_t copyKind; // CUpti_ActivityMemcpyKind: H2D=1, D2H=2, D2D=8, P2P=10
+  uint32_t sync;     // 1=synchronous, 0=asynchronous
+  uint32_t pid;      // process ID that initiated this memcpy
+  uint32_t tid;      // thread ID that initiated this memcpy
 } ActivityEvent;
 
 __attribute__((noinline)) void
@@ -32,11 +39,16 @@ parcagpuActivityBatch(const ActivityEvent *events, uint32_t count) {
 
   for (uint32_t i = 0; i < count; i++) {
     const ActivityEvent *e = &events[i];
-    if (COLAGPU_KERNEL_EXECUTED_ENABLED()) {
-      // Emit USDT probe for kernel execution
-      COLAGPU_KERNEL_EXECUTED(e->start, e->end, e->correlationId, e->deviceId,
-                              e->streamId, e->graphId, e->graphNodeId, e->name);
+    if (e->kind == ACTIVITY_KIND_KERNEL) {
+      if (COLAGPU_KERNEL_EXECUTED_ENABLED()) {
+        // Emit USDT probe for kernel execution
+        COLAGPU_KERNEL_EXECUTED(e->start, e->end, e->correlationId, e->deviceId,
+                                e->streamId, e->graphId, e->graphNodeId,
+                                e->name);
+      }
     }
+    // Note: ACTIVITY_KIND_MEMCPY events are only emitted via the batch
+    // ACTIVITY_BATCH probe (below); no individual USDT probe for memcpy.
     batchPtrs[i] = e;
   }
   if (COLAGPU_ACTIVITY_BATCH_ENABLED()) {

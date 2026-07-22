@@ -64,4 +64,28 @@ private:
   mutable std::mutex mutex_;
 };
 
+// MemcpyCorrelationMap - stores pid/tid for memcpy launch correlation IDs.
+// Populated on API EXIT (memcpy callbacks), consumed when memcpy activity
+// records arrive in completeBuffer, then removed. The pid/tid are not
+// available from the activity record itself — only from the host-side
+// callback — so we must bridge them through this map.
+class MemcpyCorrelationMap {
+public:
+  struct Info {
+    uint32_t pid;
+    uint32_t tid;
+  };
+
+  void insert(uint32_t correlation_id, uint32_t pid, uint32_t tid);
+  // Returns true and fills *out if correlation_id was found (and removes it).
+  bool check_and_remove(uint32_t correlation_id, Info *out);
+  // Remove all entries with correlation_id < threshold.
+  void trim(uint32_t threshold);
+  size_t size() const;
+
+private:
+  std::unordered_map<uint32_t, Info> map_;
+  mutable std::mutex mutex_;
+};
+
 } // namespace parcagpu

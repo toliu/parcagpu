@@ -112,4 +112,46 @@ size_t GraphCorrelationMap::size() const {
   return map_.size();
 }
 
+//=============================================================================
+// MemcpyCorrelationMap implementation
+//=============================================================================
+
+void MemcpyCorrelationMap::insert(uint32_t correlation_id, uint32_t pid,
+                                  uint32_t tid) {
+  std::lock_guard<std::mutex> lock(mutex_);
+  map_[correlation_id] = Info{pid, tid};
+}
+
+bool MemcpyCorrelationMap::check_and_remove(uint32_t correlation_id,
+                                            Info *out) {
+  std::lock_guard<std::mutex> lock(mutex_);
+  auto it = map_.find(correlation_id);
+  if (it != map_.end()) {
+    *out = it->second;
+    map_.erase(it);
+    return true;
+  }
+  return false;
+}
+
+void MemcpyCorrelationMap::trim(uint32_t threshold) {
+  std::lock_guard<std::mutex> lock(mutex_);
+  if (threshold == 0) {
+    map_.clear();
+    return;
+  }
+  for (auto it = map_.begin(); it != map_.end();) {
+    if (it->first < threshold) {
+      it = map_.erase(it);
+    } else {
+      ++it;
+    }
+  }
+}
+
+size_t MemcpyCorrelationMap::size() const {
+  std::lock_guard<std::mutex> lock(mutex_);
+  return map_.size();
+}
+
 } // namespace parcagpu
