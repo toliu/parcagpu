@@ -7,6 +7,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <dlfcn.h>
 #include <time.h>
 #include <unistd.h>
 
@@ -677,6 +678,18 @@ private:
         // Process on EXIT to avoid adding latency to GPU launch
         if (cbdata->callbackSite != CUPTI_API_EXIT) {
           return;
+        }
+        if (domain == CUPTI_CB_DOMAIN_RUNTIME_API && COLAGPU_ERROR_ENABLED()) {
+          cudaError_t *err =
+              reinterpret_cast<cudaError_t *>(cbdata->functionReturnValue);
+          if (*err != cudaSuccess) {
+            static auto cudaGetErrorName = (const char *(*)(cudaError_t))dlsym(
+                RTLD_DEFAULT, "cudaGetErrorName");
+            const char *message =
+                cudaGetErrorName ? cudaGetErrorName(*err) : "Unknown";
+            const char *component = "api";
+            fireError(*(int32_t *)(err), message, component);
+          }
         }
 
         // EXIT: while a sampling window is open, drain CUPTI's host staging
