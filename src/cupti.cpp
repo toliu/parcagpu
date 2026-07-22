@@ -1,6 +1,7 @@
 // Copyright 2026 The Parca Authors
 // SPDX-License-Identifier: Apache-2.0
 
+#include <algorithm>
 #include <atomic>
 #include <cstdint>
 #include <cstdio>
@@ -19,6 +20,12 @@
 #include "env_config.h"
 #include "pc_sampling.h"
 #include "token_bucket.h"
+
+constexpr std::array<CUpti_CallbackId, 4> kSynchronizeCallbacks = {
+    CUPTI_DRIVER_TRACE_CBID_cuStreamSynchronize,
+    CUPTI_DRIVER_TRACE_CBID_cuCtxSynchronize,
+    CUPTI_DRIVER_TRACE_CBID_cuEventSynchronize,
+    CUPTI_DRIVER_TRACE_CBID_cuStreamSynchronize_ptsz};
 
 namespace parcagpu {
 
@@ -252,6 +259,19 @@ public:
       proton::setResourceCallbacks(subscriber, /*enable=*/true);
     }
 
+    // Enable synchronize driver API callbacks for sync tracking
+    for (auto cbId : kSynchronizeCallbacks) {
+      result = proton::cupti::enableCallback<true>(
+          /*enable=*/1, subscriber, CUPTI_CB_DOMAIN_DRIVER_API, cbId);
+      if (result != CUPTI_SUCCESS) {
+        DEBUG_PRINTF("[COLAGPU] Failed to enableCallback %d: error %d\n", cbId,
+                     result);
+        return false;
+      } else {
+        DEBUG_PRINTF("[COLAGPU] enable driver callback %d\n", cbId);
+      }
+    }
+
     // Register activity buffer callbacks (using Proton's pattern)
     result = proton::cupti::activityRegisterCallbacks<true>(allocBuffer,
                                                             completeBuffer);
@@ -298,6 +318,11 @@ public:
     if (subscriber) {
       proton::setRuntimeCallbacks(subscriber, /*enable=*/false);
       proton::setLaunchCallbacks(subscriber, /*enable=*/false);
+
+      for (auto cbId : kSynchronizeCallbacks) {
+        proton::cupti::enableCallback<false>(/*enable=*/0, subscriber,
+                                             CUPTI_CB_DOMAIN_DRIVER_API, cbId);
+      }
       if (pcSamplingEnabled) {
         proton::setResourceCallbacks(subscriber, /*enable=*/false);
       }
@@ -581,7 +606,32 @@ private:
         }
         break;
       }
-      case CUPTI_CB_DOMAIN_DRIVER_API:
+      case CUPTI_CB_DOMAIN_DRIVER_API: {
+        if (std::find(std::begin(kSynchronizeCallbacks),
+                      std::end(kSynchronizeCallbacks),
+                      cbid) != std::end(kSynchronizeCallbacks)) {
+          static thread_local uint64_t syncEnterNs = 0;
+          const CUpti_CallbackData *cbdata =
+              static_cast<const CUpti_CallbackData *>(cbdata_void);
+          if (cbdata->callbackSite == CUPTI_API_ENTER) {
+            syncEnterNs = nowNs();
+          } else if (cbdata->callbackSite == CUPTI_API_EXIT) {
+            uint64_t exitNs = nowNs();
+
+            const char *name =
+                cbdata->functionName ? cbdata->functionName : "(unknown)";
+            DEBUG_PRINTF("[COLAGPU] Synchronize: cbid=%u, duration=%lu ns, "
+                         "func=%s, correlationId=%u\n",
+                         cbid, exitNs - syncEnterNs, name,
+                         cbdata->correlationId);
+            if (COLAGPU_API_SYNCHRONIZE_ENABLED()) {
+              COLAGPU_API_SYNCHRONIZE(syncEnterNs, exitNs, name);
+            }
+          }
+          break;
+        }
+        // Non-synchronize DRIVER_API falls through to RUNTIME_API handling
+      }
       case CUPTI_CB_DOMAIN_RUNTIME_API: {
         // Handle both Runtime and Driver API callbacks
         const CUpti_CallbackData *cbdata =
