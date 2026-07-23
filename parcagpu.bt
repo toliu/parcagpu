@@ -46,21 +46,20 @@ usdt:*:colagpu:activity_batch {
     if ($limit > 128) {
         $limit = 128;
     }
-    // ActivityEvent layout (packed, aligned 8, 80 bytes total):
+    // ActivityEvent layout (packed, aligned 8, 72 bytes total):
     //   +0:  kind (u64)
     //   +8:  start (u64)
     //  +16:  end (u64)
     //  +24:  correlationId (u32)
     //  +28:  deviceId (u32)
     //  +32:  streamId (u32)
-    //  +36:  graphId (u32)
-    //  +40:  graphNodeId (u64)
-    //  +48:  name (const char *)          --- points into CUPTI buffer (kernel only)
-    //  +56:  bytes (u64)                  --- memcpy only
-    //  +64:  copyKind (u32)              --- memcpy only: 1=H2D, 2=D2H, 8=D2D, 10=P2P
-    //  +68:  sync (u32)                  --- memcpy only: 1=sync, 0=async
-    //  +72:  pid (u32)                   --- memcpy only
-    //  +76:  tid (u32)                   --- memcpy only
+    //  +36:  tid (u32)                   --- memcpy only: thread that initiated this memcpy
+    //  +40:  bytes (u64)                 --- memcpy only
+    //  +48:  copyKind (u16)              --- memcpy only: 1=H2D, 2=D2H, 8=D2D, 10=P2P
+    //  +50:  sync (u16)                  --- memcpy only: 1=sync, 0=async
+    //  +52:  graphId (u32)               --- kernel only
+    //  +56:  graphNodeId (u64)           --- kernel only
+    //  +64:  name (const char *)         --- kernel only: points into CUPTI buffer
     if ($limit > 0) {
         for ($i : 0..($limit)) {
             $r = *(uint64 *)($ptrs + $i * 8);
@@ -69,31 +68,30 @@ usdt:*:colagpu:activity_batch {
             $dur = (int64)(*(uint64 *)($r + 16)) - (int64)(*(uint64 *)($r + 8));
             if ($kind == 1) {
                 // ACTIVITY_KIND_KERNEL
-                $name_ptr = *(uint64 *)($r + 48);
+                $name_ptr = *(uint64 *)($r + 64);
                 printf("  [%d] KERNEL  corr=%u dev=%u strm=%u gid=%u node=%lu dur=%ld name=%s\n",
                     $i,
                     *(uint32 *)($r + 24),
                     *(uint32 *)($r + 28),
                     *(uint32 *)($r + 32),
-                    *(uint32 *)($r + 36),
-                    *(uint64 *)($r + 40),
+                    *(uint32 *)($r + 52),
+                    *(uint64 *)($r + 56),
                     $dur,
                     str($name_ptr));
             } else if ($kind == 3) {
                 // ACTIVITY_KIND_MEMCPY
-                $copyKind = *(uint32 *)($r + 64);
+                $copyKind = *(uint16 *)($r + 48);
                 $kindStr = ($copyKind == 1) ? "H2D" : (($copyKind == 2) ? "D2H" : (($copyKind == 8) ? "D2D" : (($copyKind == 10) ? "P2P" : "?")));
-                printf("  [%d] MEMCPY  %-4s bytes=%lu  corr=%u dev=%u strm=%u dur=%ld  sync=%u pid=%u tid=%u\n",
+                printf("  [%d] MEMCPY  %-4s bytes=%lu  corr=%u dev=%u strm=%u dur=%ld  sync=%u tid=%u\n",
                     $i,
                     $kindStr,
-                    *(uint64 *)($r + 56),
+                    *(uint64 *)($r + 40),
                     *(uint32 *)($r + 24),
                     *(uint32 *)($r + 28),
                     *(uint32 *)($r + 32),
                     $dur,
-                    *(uint32 *)($r + 68),
-                    *(uint32 *)($r + 72),
-                    *(uint32 *)($r + 76));
+                    *(uint16 *)($r + 50),
+                    *(uint32 *)($r + 36));
             } else {
                 // ACTIVITY_KIND_HOST_API (=2) or unknown
                 printf("  [%d] HOSTAPI corr=%u dur=%ld  kind=%lu\n",

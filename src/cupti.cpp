@@ -47,6 +47,14 @@ static bool isMemcpyRuntimeCbid(CUpti_CallbackId cbid) {
   return false;
 }
 
+static bool isSynchronizeCbid(CUpti_CallbackId cbid) {
+  for (auto id : kSynchronizeCallbacks) {
+    if (id == cbid)
+      return true;
+  }
+  return false;
+}
+
 namespace parcagpu {
 
 // Debug logging control
@@ -67,67 +75,69 @@ thread_local uint32_t runtimeEnterCorrelationId = 0;
 // configurable via COLAGPU_RATE_LIMIT).
 thread_local TokenBucket callbackLimiter(100.0);
 
+// //
 // ---------------------------------------------------------------------------
-// PC sampling probabilistic control.
-//
-// Sampling is gated by a per-thread interval + dice-roll mechanism: at most
-// once per kPCSamplingIntervalNs, roll against probability; if it hits, open
-// a sampling window that stays active until the next interval boundary.
-//
-// The user-facing knob is COLAGPU_PC_SAMPLING_RATE (samples/sec); a
-// process-wide controller adjusts the dice-roll probability over time so the
-// observed sample rate converges on the target. Internally the controller
-// reads `samplesTotal` (incremented from pc_sampling.cpp on every batch) and
-// recalibrates probability every kPCControlPeriodNs based on the rate
-// observed since the last update.
+// // PC sampling probabilistic control.
+// //
+// // Sampling is gated by a per-thread interval + dice-roll mechanism: at most
+// // once per kPCSamplingIntervalNs, roll against probability; if it hits, open
+// // a sampling window that stays active until the next interval boundary.
+// //
+// // The user-facing knob is COLAGPU_PC_SAMPLING_RATE (samples/sec); a
+// // process-wide controller adjusts the dice-roll probability over time so the
+// // observed sample rate converges on the target. Internally the controller
+// // reads `samplesTotal` (incremented from pc_sampling.cpp on every batch) and
+// // recalibrates probability every kPCControlPeriodNs based on the rate
+// // observed since the last update.
+// //
 // ---------------------------------------------------------------------------
-
-// 30 ms — short enough to give ~33 dice rolls/sec (tighter rate variance,
-// faster response to workload phase changes), long enough that CUPTI
-// start/stop cost (~25 us measured) is amortized to <0.1% of wall time.
-static constexpr uint64_t kPCSamplingIntervalNs = 30'000'000ULL;
-// How often the controller recalibrates probability based on observed rate.
-static constexpr uint64_t kPCControlPeriodNs = 5'000'000'000ULL;
-// Don't react to <25% rate error (avoids oscillating on noise).
-static constexpr double kPCControlTolerance = 0.25;
-// Symmetric step clamp at sqrt(2). Larger steps (2x or 4x) amplify
-// single-window sampling noise into multi-update oscillations: one
-// 30ms window happening to land in an idle phase shows few samples,
-// the controller over-corrects, then the next busy phase shows many.
-// sqrt(2) keeps each adjustment small enough that the eventual
-// equilibrium sits within the tolerance band even under bursty signal.
-static constexpr double kPCControlStepShrink = 1.41421356;
-static constexpr double kPCControlStepGrow = 1.41421356;
-static constexpr double kPCProbMin = 0.001;
-static constexpr double kPCProbMax = 1.0;
-// Initial probability *at the default target rate*. Higher values waste
-// samples on kernel-dense workloads (FNS-class: 5K launches/sec); lower
-// values starve kernel-sparse workloads (a few launches/sec) of dice
-// rolls until the controller grows it. 0.02 is a tested compromise at
-// targetRate=100. Real initial probability scales with targetRate (see
-// init_debug) so callers asking for high rates start sampling
-// immediately instead of waiting many control periods to climb.
-static constexpr double kPCInitialProbabilityAtDefaultRate = 0.02;
-// Default target rate when COLAGPU_PC_SAMPLING_RATE is unset.
-static constexpr double kPCDefaultTargetRate = 100.0;
-
-struct PCRateController {
-  double targetRate = kPCDefaultTargetRate; // immutable after init
-  std::atomic<double> probability{kPCInitialProbabilityAtDefaultRate};
-  std::atomic<uint64_t> samplesTotal{0};
-  std::atomic<uint64_t> lastCheckNs{0};
-  std::atomic<uint64_t> lastCheckTotal{0};
-};
-static PCRateController g_pcController;
-
-// Per-thread sampling state.
-struct PCSamplingState {
-  bool active = false;        // Currently sampling
-  uint64_t windowStartNs = 0; // When the current window opened
-  uint64_t lastCheckNs = 0;   // Last time we rolled the dice
-  unsigned int rngSeed = 0;   // Thread-local RNG state
-};
-thread_local PCSamplingState g_pcSamplingState;
+//
+// // 30 ms — short enough to give ~33 dice rolls/sec (tighter rate variance,
+// // faster response to workload phase changes), long enough that CUPTI
+// // start/stop cost (~25 us measured) is amortized to <0.1% of wall time.
+// static constexpr uint64_t kPCSamplingIntervalNs = 30'000'000ULL;
+// // How often the controller recalibrates probability based on observed rate.
+// static constexpr uint64_t kPCControlPeriodNs = 5'000'000'000ULL;
+// // Don't react to <25% rate error (avoids oscillating on noise).
+// static constexpr double kPCControlTolerance = 0.25;
+// // Symmetric step clamp at sqrt(2). Larger steps (2x or 4x) amplify
+// // single-window sampling noise into multi-update oscillations: one
+// // 30ms window happening to land in an idle phase shows few samples,
+// // the controller over-corrects, then the next busy phase shows many.
+// // sqrt(2) keeps each adjustment small enough that the eventual
+// // equilibrium sits within the tolerance band even under bursty signal.
+// static constexpr double kPCControlStepShrink = 1.41421356;
+// static constexpr double kPCControlStepGrow = 1.41421356;
+// static constexpr double kPCProbMin = 0.001;
+// static constexpr double kPCProbMax = 1.0;
+// // Initial probability *at the default target rate*. Higher values waste
+// // samples on kernel-dense workloads (FNS-class: 5K launches/sec); lower
+// // values starve kernel-sparse workloads (a few launches/sec) of dice
+// // rolls until the controller grows it. 0.02 is a tested compromise at
+// // targetRate=100. Real initial probability scales with targetRate (see
+// // init_debug) so callers asking for high rates start sampling
+// // immediately instead of waiting many control periods to climb.
+// static constexpr double kPCInitialProbabilityAtDefaultRate = 0.02;
+// // Default target rate when COLAGPU_PC_SAMPLING_RATE is unset.
+// static constexpr double kPCDefaultTargetRate = 100.0;
+//
+// struct PCRateController {
+//   double targetRate = kPCDefaultTargetRate; // immutable after init
+//   std::atomic<double> probability{kPCInitialProbabilityAtDefaultRate};
+//   std::atomic<uint64_t> samplesTotal{0};
+//   std::atomic<uint64_t> lastCheckNs{0};
+//   std::atomic<uint64_t> lastCheckTotal{0};
+// };
+// static PCRateController g_pcController;
+//
+// // Per-thread sampling state.
+// struct PCSamplingState {
+//   bool active = false;        // Currently sampling
+//   uint64_t windowStartNs = 0; // When the current window opened
+//   uint64_t lastCheckNs = 0;   // Last time we rolled the dice
+//   unsigned int rngSeed = 0;   // Thread-local RNG state
+// };
+// thread_local PCSamplingState g_pcSamplingState;
 
 static uint64_t nowNs() {
   struct timespec ts;
@@ -135,64 +145,67 @@ static uint64_t nowNs() {
   return (uint64_t)ts.tv_sec * 1000000000ULL + ts.tv_nsec;
 }
 
-// Seed the per-thread RNG lazily.
-static void ensureRngSeeded(PCSamplingState &s) {
-  if (s.rngSeed == 0) {
-    uint64_t t = nowNs();
-    s.rngSeed = (unsigned int)(t ^ (uintptr_t)&s);
-    if (s.rngSeed == 0)
-      s.rngSeed = 1;
-  }
-}
-
-static double threadRandom(PCSamplingState &s) {
-  ensureRngSeeded(s);
-  return (double)rand_r(&s.rngSeed) / RAND_MAX;
-}
-
-// Called from pc_sampling.cpp:processPCSamplingData() once per CUPTI batch
-// with the sum of distinct (PC, stallReason) pairs that had non-zero samples
-// — the unit the agent emits as a gpu_pc record on the receive side, and the
-// right rate to steer the controller with.
+// // Seed the per-thread RNG lazily.
+// static void ensureRngSeeded(PCSamplingState &s) {
+//   if (s.rngSeed == 0) {
+//     uint64_t t = nowNs();
+//     s.rngSeed = (unsigned int)(t ^ (uintptr_t)&s);
+//     if (s.rngSeed == 0)
+//       s.rngSeed = 1;
+//   }
+// }
+//
+// static double threadRandom(PCSamplingState &s) {
+//   ensureRngSeeded(s);
+//   return (double)rand_r(&s.rngSeed) / RAND_MAX;
+// }
+//
+// // Called from pc_sampling.cpp:processPCSamplingData() once per CUPTI batch
+// // with the sum of distinct (PC, stallReason) pairs that had non-zero samples
+// // — the unit the agent emits as a gpu_pc record on the receive side, and the
+// // right rate to steer the controller with.
 void recordPCSamples(uint64_t n) {
-  g_pcController.samplesTotal.fetch_add(n, std::memory_order_relaxed);
+  // g_pcController.samplesTotal.fetch_add(n, std::memory_order_relaxed);
+  (void)n;
 }
-
-// Adjust controller.probability to converge on targetRate. Cheap to call —
-// returns immediately unless kPCControlPeriodNs has elapsed since the last
-// adjustment. Safe under concurrent calls (CAS on lastCheckNs).
-static void controllerMaybeUpdate() {
-  if (g_pcController.targetRate <= 0.0)
-    return;
-  uint64_t now = nowNs();
-  uint64_t last = g_pcController.lastCheckNs.load(std::memory_order_relaxed);
-  if (now - last < kPCControlPeriodNs)
-    return;
-  // Only one thread per period actually performs the update.
-  if (!g_pcController.lastCheckNs.compare_exchange_strong(
-          last, now, std::memory_order_acq_rel))
-    return;
-  uint64_t total = g_pcController.samplesTotal.load(std::memory_order_relaxed);
-  uint64_t lastTotal =
-      g_pcController.lastCheckTotal.exchange(total, std::memory_order_acq_rel);
-  uint64_t delta = total - lastTotal;
-  uint64_t elapsed = now - last;
-  if (elapsed == 0)
-    return;
-  double observedRate = (double)delta * 1e9 / (double)elapsed;
-  double err =
-      (observedRate - g_pcController.targetRate) / g_pcController.targetRate;
-  if (std::abs(err) <= kPCControlTolerance)
-    return;
-  double ratio = g_pcController.targetRate / std::max(observedRate, 1e-3);
-  ratio = std::clamp(ratio, 1.0 / kPCControlStepShrink, kPCControlStepGrow);
-  double oldP = g_pcController.probability.load(std::memory_order_relaxed);
-  double newP = std::clamp(oldP * ratio, kPCProbMin, kPCProbMax);
-  g_pcController.probability.store(newP, std::memory_order_relaxed);
-  DEBUG_PRINTF("[COLAGPU] PC rate controller: observed=%.2f target=%.2f "
-               "old_p=%.5f new_p=%.5f\n",
-               observedRate, g_pcController.targetRate, oldP, newP);
-}
+//
+// // Adjust controller.probability to converge on targetRate. Cheap to call —
+// // returns immediately unless kPCControlPeriodNs has elapsed since the last
+// // adjustment. Safe under concurrent calls (CAS on lastCheckNs).
+// static void controllerMaybeUpdate() {
+//   if (g_pcController.targetRate <= 0.0)
+//     return;
+//   uint64_t now = nowNs();
+//   uint64_t last = g_pcController.lastCheckNs.load(std::memory_order_relaxed);
+//   if (now - last < kPCControlPeriodNs)
+//     return;
+//   // Only one thread per period actually performs the update.
+//   if (!g_pcController.lastCheckNs.compare_exchange_strong(
+//           last, now, std::memory_order_acq_rel))
+//     return;
+//   uint64_t total =
+//   g_pcController.samplesTotal.load(std::memory_order_relaxed); uint64_t
+//   lastTotal =
+//       g_pcController.lastCheckTotal.exchange(total,
+//       std::memory_order_acq_rel);
+//   uint64_t delta = total - lastTotal;
+//   uint64_t elapsed = now - last;
+//   if (elapsed == 0)
+//     return;
+//   double observedRate = (double)delta * 1e9 / (double)elapsed;
+//   double err =
+//       (observedRate - g_pcController.targetRate) / g_pcController.targetRate;
+//   if (std::abs(err) <= kPCControlTolerance)
+//     return;
+//   double ratio = g_pcController.targetRate / std::max(observedRate, 1e-3);
+//   ratio = std::clamp(ratio, 1.0 / kPCControlStepShrink, kPCControlStepGrow);
+//   double oldP = g_pcController.probability.load(std::memory_order_relaxed);
+//   double newP = std::clamp(oldP * ratio, kPCProbMin, kPCProbMax);
+//   g_pcController.probability.store(newP, std::memory_order_relaxed);
+//   DEBUG_PRINTF("[COLAGPU] PC rate controller: observed=%.2f target=%.2f "
+//                "old_p=%.5f new_p=%.5f\n",
+//                observedRate, g_pcController.targetRate, oldP, newP);
+// }
 
 void init_debug() {
   static bool initialized = false;
@@ -207,26 +220,26 @@ void init_debug() {
       }
     }
 
-    const char *targetRateEnv = getenv("COLAGPU_PC_SAMPLING_RATE");
-    if (targetRateEnv) {
-      double r = atof(targetRateEnv);
-      if (r > 0.0)
-        g_pcController.targetRate = r;
-    }
-    // Scale initial probability with target rate so high-target requests
-    // start sampling immediately. The controller fires only when a
-    // sampling window closes; if the workload launches kernels rarely
-    // (vortex-class: ~1 launch/sec) and the initial probability is too
-    // low for a window to open, the controller starves and can never
-    // climb. Scaling avoids that for the common "user wants lots of
-    // samples on a sparse workload" case.
-    {
-      double scaled = kPCInitialProbabilityAtDefaultRate *
-                      (g_pcController.targetRate / kPCDefaultTargetRate);
-      double initP = std::clamp(scaled, kPCProbMin, kPCProbMax);
-      g_pcController.probability.store(initP, std::memory_order_relaxed);
-    }
-    g_pcController.lastCheckNs.store(nowNs(), std::memory_order_relaxed);
+    // const char *targetRateEnv = getenv("COLAGPU_PC_SAMPLING_RATE");
+    // if (targetRateEnv) {
+    //   double r = atof(targetRateEnv);
+    //   if (r > 0.0)
+    //     g_pcController.targetRate = r;
+    // }
+    // // Scale initial probability with target rate so high-target requests
+    // // start sampling immediately. The controller fires only when a
+    // // sampling window closes; if the workload launches kernels rarely
+    // // (vortex-class: ~1 launch/sec) and the initial probability is too
+    // // low for a window to open, the controller starves and can never
+    // // climb. Scaling avoids that for the common "user wants lots of
+    // // samples on a sparse workload" case.
+    // {
+    //   double scaled = kPCInitialProbabilityAtDefaultRate *
+    //                   (g_pcController.targetRate / kPCDefaultTargetRate);
+    //   double initP = std::clamp(scaled, kPCProbMin, kPCProbMax);
+    //   g_pcController.probability.store(initP, std::memory_order_relaxed);
+    // }
+    // g_pcController.lastCheckNs.store(nowNs(), std::memory_order_relaxed);
 
     validateEnvVars();
     initialized = true;
@@ -253,14 +266,14 @@ public:
 
     DEBUG_PRINTF("[COLAGPU] Starting initialization\n");
 
-    // Check if PC sampling is supported
-    pcSamplingEnabled = parcagpu::PCSampling::isSupported();
-    if (pcSamplingEnabled) {
-      DEBUG_PRINTF("[COLAGPU] PC sampling enabled (serialized mode)\n");
-    } else {
-      DEBUG_PRINTF(
-          "[COLAGPU] PC sampling disabled, using kernel activity only\n");
-    }
+    // // Check if PC sampling is supported
+    // pcSamplingEnabled = parcagpu::PCSampling::isSupported();
+    // if (pcSamplingEnabled) {
+    //   DEBUG_PRINTF("[COLAGPU] PC sampling enabled (serialized mode)\n");
+    // } else {
+    //   DEBUG_PRINTF(
+    //       "[COLAGPU] PC sampling disabled, using kernel activity only\n");
+    // }
 
     // Subscribe to callbacks
     auto result =
@@ -275,10 +288,10 @@ public:
     proton::setRuntimeCallbacks(subscriber, /*enable=*/true);
     proton::setLaunchCallbacks(subscriber, /*enable=*/true);
 
-    // Enable resource callbacks only if PC sampling is enabled
-    if (pcSamplingEnabled) {
-      proton::setResourceCallbacks(subscriber, /*enable=*/true);
-    }
+    // // Enable resource callbacks only if PC sampling is enabled
+    // if (pcSamplingEnabled) {
+    //   proton::setResourceCallbacks(subscriber, /*enable=*/true);
+    // }
 
     // Enable synchronize driver API callbacks for sync tracking
     for (auto cbId : kSynchronizeCallbacks) {
@@ -365,9 +378,9 @@ public:
         proton::cupti::enableCallback<false>(/*enable=*/0, subscriber,
                                              CUPTI_CB_DOMAIN_RUNTIME_API, cbId);
       }
-      if (pcSamplingEnabled) {
-        proton::setResourceCallbacks(subscriber, /*enable=*/false);
-      }
+      // if (pcSamplingEnabled) {
+      //   proton::setResourceCallbacks(subscriber, /*enable=*/false);
+      // }
     }
 
     // Cleanup runs from atexit and may also reach us via a libcupti callback
@@ -403,11 +416,11 @@ public:
 
 private:
   std::atomic<bool> initialized{false};
-  bool pcSamplingEnabled = false;
+  // bool pcSamplingEnabled = false;
   CUpti_SubscriberHandle subscriber = nullptr;
 
-  // PC sampling state — owned by this profiler, destroyed with it.
-  parcagpu::PCSampling pcSampling;
+  // // PC sampling state — owned by this profiler, destroyed with it.
+  // parcagpu::PCSampling pcSampling;
 
   // Outstanding event counter for flushing
   size_t outstandingEvents = 0;
@@ -589,7 +602,6 @@ private:
         evt.bytes = m->bytes;
         evt.copyKind = m->copyKind;
         evt.sync = (m->flags & CUPTI_ACTIVITY_FLAG_MEMCPY_ASYNC) ? 0 : 1;
-        evt.pid = found ? info.pid : 0;
         evt.tid = found ? info.tid : 0;
         break;
       }
@@ -619,7 +631,6 @@ private:
         evt.bytes = m->bytes;
         evt.copyKind = m->copyKind;
         evt.sync = (m->flags & CUPTI_ACTIVITY_FLAG_MEMCPY_ASYNC) ? 0 : 1;
-        evt.pid = found ? info.pid : 0;
         evt.tid = found ? info.tid : 0;
         break;
       }
@@ -665,60 +676,59 @@ private:
     try {
       auto &profiler = CuptiProfiler::instance();
       switch (domain) {
-      case CUPTI_CB_DOMAIN_RESOURCE: {
-        // Handle resource callbacks for PC sampling (only if enabled)
-        if (!profiler.pcSamplingEnabled) {
-          return;
-        }
-
-        const CUpti_ResourceData *resData =
-            static_cast<const CUpti_ResourceData *>(cbdata_void);
-
-        switch (cbid) {
-        case CUPTI_CBID_RESOURCE_MODULE_LOADED: {
-          const CUpti_ModuleResourceData *modData =
-              static_cast<const CUpti_ModuleResourceData *>(
-                  resData->resourceDescriptor);
-          if (modData && modData->pCubin && modData->cubinSize > 0) {
-            DEBUG_PRINTF("[COLAGPU] Module loaded: cubin=%p size=%zu\n",
-                         modData->pCubin, modData->cubinSize);
-            profiler.pcSampling.loadModule(modData->pCubin, modData->cubinSize);
-          }
-          break;
-        }
-        case CUPTI_CBID_RESOURCE_MODULE_UNLOAD_STARTING: {
-          const CUpti_ModuleResourceData *modData =
-              static_cast<const CUpti_ModuleResourceData *>(
-                  resData->resourceDescriptor);
-          if (modData && modData->pCubin && modData->cubinSize > 0) {
-            DEBUG_PRINTF("[COLAGPU] Module unloading: cubin=%p size=%zu\n",
-                         modData->pCubin, modData->cubinSize);
-            profiler.pcSampling.unloadModule(modData->pCubin,
-                                             modData->cubinSize);
-          }
-          break;
-        }
-        case CUPTI_CBID_RESOURCE_CONTEXT_CREATED: {
-          CUcontext ctx = resData->context;
-          DEBUG_PRINTF("[COLAGPU] Context created: %p\n", ctx);
-          profiler.pcSampling.initialize(ctx);
-          break;
-        }
-        case CUPTI_CBID_RESOURCE_CONTEXT_DESTROY_STARTING: {
-          CUcontext ctx = resData->context;
-          DEBUG_PRINTF("[COLAGPU] Context destroying: %p\n", ctx);
-          profiler.pcSampling.finalize(ctx);
-          break;
-        }
-        default:
-          break;
-        }
-        break;
-      }
+      // case CUPTI_CB_DOMAIN_RESOURCE: {
+      //   // Handle resource callbacks for PC sampling (only if enabled)
+      //   if (!profiler.pcSamplingEnabled) {
+      //     return;
+      //   }
+      //
+      //   const CUpti_ResourceData *resData =
+      //       static_cast<const CUpti_ResourceData *>(cbdata_void);
+      //
+      //   switch (cbid) {
+      //   case CUPTI_CBID_RESOURCE_MODULE_LOADED: {
+      //     const CUpti_ModuleResourceData *modData =
+      //         static_cast<const CUpti_ModuleResourceData *>(
+      //             resData->resourceDescriptor);
+      //     if (modData && modData->pCubin && modData->cubinSize > 0) {
+      //       DEBUG_PRINTF("[COLAGPU] Module loaded: cubin=%p size=%zu\n",
+      //                    modData->pCubin, modData->cubinSize);
+      //       profiler.pcSampling.loadModule(modData->pCubin,
+      //       modData->cubinSize);
+      //     }
+      //     break;
+      //   }
+      //   case CUPTI_CBID_RESOURCE_MODULE_UNLOAD_STARTING: {
+      //     const CUpti_ModuleResourceData *modData =
+      //         static_cast<const CUpti_ModuleResourceData *>(
+      //             resData->resourceDescriptor);
+      //     if (modData && modData->pCubin && modData->cubinSize > 0) {
+      //       DEBUG_PRINTF("[COLAGPU] Module unloading: cubin=%p size=%zu\n",
+      //                    modData->pCubin, modData->cubinSize);
+      //       profiler.pcSampling.unloadModule(modData->pCubin,
+      //                                        modData->cubinSize);
+      //     }
+      //     break;
+      //   }
+      //   case CUPTI_CBID_RESOURCE_CONTEXT_CREATED: {
+      //     CUcontext ctx = resData->context;
+      //     DEBUG_PRINTF("[COLAGPU] Context created: %p\n", ctx);
+      //     profiler.pcSampling.initialize(ctx);
+      //     break;
+      //   }
+      //   case CUPTI_CBID_RESOURCE_CONTEXT_DESTROY_STARTING: {
+      //     CUcontext ctx = resData->context;
+      //     DEBUG_PRINTF("[COLAGPU] Context destroying: %p\n", ctx);
+      //     profiler.pcSampling.finalize(ctx);
+      //     break;
+      //   }
+      //   default:
+      //     break;
+      //   }
+      //   break;
+      // }
       case CUPTI_CB_DOMAIN_DRIVER_API: {
-        if (std::find(std::begin(kSynchronizeCallbacks),
-                      std::end(kSynchronizeCallbacks),
-                      cbid) != std::end(kSynchronizeCallbacks)) {
+        if (isSynchronizeCbid(cbid)) {
           static thread_local uint64_t syncEnterNs = 0;
           const CUpti_CallbackData *cbdata =
               static_cast<const CUpti_CallbackData *>(cbdata_void);
@@ -726,14 +736,14 @@ private:
             syncEnterNs = nowNs();
           } else if (cbdata->callbackSite == CUPTI_API_EXIT) {
             uint64_t exitNs = nowNs();
-
             const char *name =
                 cbdata->functionName ? cbdata->functionName : "(unknown)";
             DEBUG_PRINTF("[COLAGPU] Synchronize: cbid=%u, duration=%lu ns, "
                          "func=%s, correlationId=%u\n",
                          cbid, exitNs - syncEnterNs, name,
                          cbdata->correlationId);
-            if (COLAGPU_API_SYNCHRONIZE_ENABLED()) {
+            if (COLAGPU_API_SYNCHRONIZE_ENABLED() &&
+                callbackLimiter.tryAcquire()) {
               COLAGPU_API_SYNCHRONIZE(syncEnterNs, exitNs, name);
             }
           }
@@ -760,26 +770,26 @@ private:
           if (domain == CUPTI_CB_DOMAIN_RUNTIME_API)
             runtimeEnterCorrelationId = correlationId;
 
-          if (profiler.pcSamplingEnabled) {
-            if (isKernelLaunchCb) {
-              auto &st = g_pcSamplingState;
-              uint64_t now = nowNs();
-
-              if (!st.active &&
-                  (now - st.lastCheckNs >= kPCSamplingIntervalNs)) {
-                st.lastCheckNs = now;
-                const double p =
-                    g_pcController.probability.load(std::memory_order_relaxed);
-                if (threadRandom(st) < p) {
-                  st.active = true;
-                  st.windowStartNs = now;
-                  profiler.pcSampling.start(cbdata->context);
-                }
-              }
-            }
-
-            profiler.pcSampling.emitMetadata();
-          }
+          // if (profiler.pcSamplingEnabled) {
+          //   if (isKernelLaunchCb) {
+          //     auto &st = g_pcSamplingState;
+          //     uint64_t now = nowNs();
+          //
+          //     if (!st.active &&
+          //         (now - st.lastCheckNs >= kPCSamplingIntervalNs)) {
+          //       st.lastCheckNs = now;
+          //       const double p =
+          //           g_pcController.probability.load(std::memory_order_relaxed);
+          //       if (threadRandom(st) < p) {
+          //         st.active = true;
+          //         st.windowStartNs = now;
+          //         profiler.pcSampling.start(cbdata->context);
+          //       }
+          //     }
+          //   }
+          //
+          //   profiler.pcSampling.emitMetadata();
+          // }
           return;
         }
 
@@ -800,28 +810,31 @@ private:
           }
         }
 
-        // EXIT: while a sampling window is open, drain CUPTI's host staging
-        // buffer on every CUDA API EXIT — not just launch EXITs. Empty drains
-        // are cheap (single API call returning 0 PCs) and missed drains lose
-        // samples (CUPTI_ERROR_OUT_OF_MEMORY when staging fills). Window close
-        // is still kernel-launch aligned: only check elapsed-time on a launch
-        // EXIT, so the window starts and ends at kernel boundaries.
-        if (profiler.pcSamplingEnabled) {
-          auto &st = g_pcSamplingState;
-
-          if (st.active) {
-            if (isKernelLaunchCb &&
-                (nowNs() - st.windowStartNs >= kPCSamplingIntervalNs)) {
-              profiler.pcSampling.stop(cbdata->context);
-              st.active = false;
-              controllerMaybeUpdate();
-            } else {
-              profiler.pcSampling.collectData(cbdata->context);
-            }
-          }
-
-          profiler.pcSampling.emitMetadata();
-        }
+        // // EXIT: while a sampling window is open, drain CUPTI's host staging
+        // // buffer on every CUDA API EXIT — not just launch EXITs. Empty
+        // drains
+        // // are cheap (single API call returning 0 PCs) and missed drains lose
+        // // samples (CUPTI_ERROR_OUT_OF_MEMORY when staging fills). Window
+        // close
+        // // is still kernel-launch aligned: only check elapsed-time on a
+        // launch
+        // // EXIT, so the window starts and ends at kernel boundaries.
+        // if (profiler.pcSamplingEnabled) {
+        //   auto &st = g_pcSamplingState;
+        //
+        //   if (st.active) {
+        //     if (isKernelLaunchCb &&
+        //         (nowNs() - st.windowStartNs >= kPCSamplingIntervalNs)) {
+        //       profiler.pcSampling.stop(cbdata->context);
+        //       st.active = false;
+        //       controllerMaybeUpdate();
+        //     } else {
+        //       profiler.pcSampling.collectData(cbdata->context);
+        //     }
+        //   }
+        //
+        //   profiler.pcSampling.emitMetadata();
+        // }
 
         // Skip correlation/rate-limiter work when no profiler is attached.
         if (!COLAGPU_API_CORRELATION_ENABLED())
@@ -890,7 +903,8 @@ private:
         // launches (they share one correlation ID across many kernels) and when
         // PC sampling is active (every kernel needs its correlation callback so
         // PC samples can be matched with CPU stacks on the agent side).
-        if (!isGraphLaunch && !g_pcSamplingState.active) {
+        // if (!isGraphLaunch && !g_pcSamplingState.active) {
+        if (!isGraphLaunch) {
           if (!callbackLimiter.tryAcquire()) {
             DEBUG_PRINTF("[COLAGPU] Rate limited: skipping probe for "
                          "correlationId=%u\n",

@@ -7,11 +7,12 @@ provider colagpu {
                         uint32_t streamId, uint32_t graphId,
                         uint64_t graphNodeId, const char *name);
   probe activity_batch(const void **ptrs, uint32_t count);
+  probe error(int32_t code, const char *message, const char *component);
+  
   probe pc_sample_batch(const void **records, uint32_t count);
   probe stall_reason_map(const char *names, uint32_t count);
   probe cubin_loaded(uint64_t cubinCrc, const char *cubin, uint64_t cubinSize);
   probe cubin_unloaded(uint64_t cubinCrc);
   probe gpu_config(uint32_t deviceId, uint32_t samplingFactor,
                     uint32_t clockKHz, uint32_t smCount);
-  probe error(int32_t code, const char *message, const char *component);
 };
