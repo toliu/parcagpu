@@ -22,11 +22,10 @@ typedef struct PACKED_ALIGNMENT {
   uint32_t correlationId;
   uint32_t deviceId;
   uint32_t streamId;
+  uint32_t tid;
 
-  // memcpy-specific fields (zero/ignored for non-memcpy events)
-  uint32_t tid; // thread ID that initiated this memcpy
   uint64_t bytes;
-  uint16_t copyKind; // CUpti_ActivityMemcpyKind: H2D=1, D2H=2, D2D=8, P2P=10
+  uint16_t copyKind; // Vendor-neutral copy kind: H2D=100, D2H=101, D2D=101, P2P=103
   uint16_t sync;     // 1=synchronous, 0=asynchronous
 
   //    kernel

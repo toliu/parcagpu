@@ -15,18 +15,20 @@ namespace parcagpu {
 //=============================================================================
 
 // CorrelationFilter for non-graph kernel launches
-// Insert on API callback, check-and-remove on kernel activity
+// Insert on API callback (stores correlation_id → tid),
+// check-and-remove on kernel activity (returns tid via output param).
 class CorrelationFilter {
 public:
-  void insert(uint32_t correlation_id);
-  bool check_and_remove(uint32_t correlation_id);
+  void insert(uint32_t correlation_id, uint32_t tid);
+  // Returns true and fills *tid if correlation_id was found (and removes it).
+  bool check_and_remove(uint32_t correlation_id, uint32_t *tid);
   // Remove all entries with correlation_id < threshold.
   // When threshold is 0, this is equivalent to clear().
   void trim(uint32_t threshold);
   size_t size() const;
 
 private:
-  std::unordered_set<uint32_t> set_;
+  std::unordered_map<uint32_t, uint32_t> map_; // correlationId → tid
   mutable std::mutex mutex_;
 };
 
@@ -44,6 +46,7 @@ struct GraphCorrelationEntry {
   uint8_t state[2];         // State for alternating cycles
   bool ever_seen_kernel;    // True once we've seen at least one kernel activity
   uint32_t insertion_cycle; // Buffer cycle when entry was created
+  uint32_t tid;             // Thread ID that launched this graph
 
   GraphCorrelationEntry(uint32_t cycle);
 };
@@ -52,9 +55,10 @@ class GraphCorrelationMap {
 public:
   GraphCorrelationMap();
 
-  void insert(uint32_t correlation_id);
+  void insert(uint32_t correlation_id, uint32_t tid);
   void cycle_start(uint32_t cycle);
-  bool check_and_mark_seen(uint32_t correlation_id, uint32_t cycle);
+  bool check_and_mark_seen(uint32_t correlation_id, uint32_t cycle,
+                           uint32_t *tid);
   void cycle_end();
   size_t size() const;
 

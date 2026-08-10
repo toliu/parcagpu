@@ -17,20 +17,17 @@ usdt:*:colagpu:api_correlation {
 usdt:*:colagpu:api_synchronize {
     $start = arg0;
     $end = arg1;
-    $name = str(arg2);
+    $kind = arg2;
     $dur_ns = $end - $start;
+    $kindStr = ($kind == 100) ? "cuStreamSynchronize" :
+               (($kind == 101) ? "cuCtxSynchronize" :
+               (($kind == 102) ? "cuEventSynchronize" :
+               (($kind == 103) ? "cuStreamSynchronize_ptsz" : "unknown")));
 
-    printf("%-12s.%-6u [SYNC] %s start=%lu end=%lu dur=%lu ns\n",
+    printf("%-12s.%-6u [SYNC] kind=%u %s start=%lu end=%lu dur=%lu ns\n",
            strftime("%H:%M:%S", nsecs),
            (nsecs % 1000000000) / 1000,
-           $name, $start, $end, $dur_ns);
-}
-
-usdt:*:colagpu:error {
-    printf("%-12s.%-6u [ERR] %d - %s - %s\n",
-           strftime("%H:%M:%S", nsecs),
-           (nsecs % 1000000000) / 1000,
-           arg0, str(arg1), str(arg2));
+           $kind, $kindStr, $start, $end, $dur_ns);
 }
 
 usdt:*:colagpu:activity_batch {
@@ -53,7 +50,7 @@ usdt:*:colagpu:activity_batch {
     //  +24:  correlationId (u32)
     //  +28:  deviceId (u32)
     //  +32:  streamId (u32)
-    //  +36:  tid (u32)                   --- memcpy only: thread that initiated this memcpy
+    //  +36:  tid (u32)                   --- memcpy only: thread ID
     //  +40:  bytes (u64)                 --- memcpy only
     //  +48:  copyKind (u16)              --- memcpy only: 1=H2D, 2=D2H, 8=D2D, 10=P2P
     //  +50:  sync (u16)                  --- memcpy only: 1=sync, 0=async

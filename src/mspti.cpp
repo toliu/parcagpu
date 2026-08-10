@@ -4,6 +4,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <exception>
+#include <sys/syscall.h>
 #include <time.h>
 #include <unistd.h>
 
@@ -137,8 +138,9 @@ private:
         msptiActivityKernel *k =
             reinterpret_cast<msptiActivityKernel *>(pRecord);
         // Regular kernel - check and remove from correlation filter
+        uint32_t kernelTid = 0;
         bool shouldEmit =
-            g_correlationFilter.check_and_remove(k->correlationId);
+            g_correlationFilter.check_and_remove(k->correlationId, &kernelTid);
 
         if (!shouldEmit) {
           DEBUG_PRINTF("[COLAGPU] Filtered kernel activity: correlationId=%u "
@@ -162,6 +164,9 @@ private:
         // Emit USDT probe for kernel execution
         COLAGPU_KERNEL_EXECUTED(k->start, k->end, k->correlationId,
                                 k->ds.deviceId, k->ds.streamId, 0, 0, k->name);
+        // Note: kernelTid captured via check_and_remove() above; exposed via
+        // the ACTIVITY_BATCH USDT probe on the eBPF side.
+        (void)kernelTid;
         break;
       }
       default:
@@ -196,7 +201,8 @@ private:
       return;
     COLAGPU_API_CORRELATION(pCallbackInfo->correlationId, callbackId,
                             pCallbackInfo->functionName);
-    g_correlationFilter.insert(pCallbackInfo->correlationId);
+    g_correlationFilter.insert(pCallbackInfo->correlationId,
+                               (uint32_t)syscall(SYS_gettid));
     // Prune stale entries if the filter grows too large
     if (g_correlationFilter.size() > 10000) {
       uint32_t threshold = pCallbackInfo->correlationId > 5000

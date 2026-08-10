@@ -10,9 +10,10 @@ build-%:
 	@echo "=== Building for $* with Docker ==="
 	@mkdir -p /tmp/parcagpu-build-$*
 	@docker buildx create --name parcagpu-builder --use --bootstrap \
+		--driver-opt "network=host" \
 		--driver-opt "env.HTTP_PROXY=http://proxy.colasoft.cn:1282" \
 		--driver-opt "env.HTTPS_PROXY=http://proxy.colasoft.cn:1282" \
-		--driver-opt env.NO_PROXY="localhost"  2>/dev/null || docker buildx use parcagpu-builder
+		--driver-opt "env.NO_PROXY=localhost"  2>/dev/null || docker buildx use parcagpu-builder
 	@docker buildx build -f Dockerfile \
 		--target export \
 		--output type=local,dest=/tmp/parcagpu-build-$* \
