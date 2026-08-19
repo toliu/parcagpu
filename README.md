@@ -40,8 +40,11 @@ export CUDA_INJECTION64_PATH=/path/to/libcolacupti.so
 ### Monitoring with bpftrace
 
 ```bash
-sudo bpftrace parcagpu.bt
+sudo bpftrace parcagpu.bt /path/to/libcolacupti.so
 ```
+
+The USDT probes are embedded in the shared library (`libcolacupti.so` / `libcolamspti.so`),
+so pass that library's path as the argument.
 
 ### Monitoring with the BPF Activity Parser
 

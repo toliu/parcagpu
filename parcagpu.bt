@@ -1,12 +1,12 @@
 #!/usr/bin/env bpftrace
 
 BEGIN {
-    printf("Monitoring CUDA activity via colagpu USDT probes...\n");
+    printf("Monitoring colagpu USDT probes: %s ...\n", $1);
     printf("%-20s %-12s %-10s %-10s %-10s %-10s %-10s %-10s %s\n",
            "TIME", "DURATION_NS", "CORR_ID", "DEVICE", "STREAM", "GRAPH", "NODE", "START", "KERNEL");
 }
 
-usdt:*:colagpu:api_correlation {
+usdt:$1:colagpu:api_correlation {
     $correlation_id = arg0;
     $cbid = arg1;
     $name = str(arg2);
@@ -14,7 +14,7 @@ usdt:*:colagpu:api_correlation {
     printf("%-12s.%-6u [CORR] %u: cbid=%u %s\n", strftime("%H:%M:%S", nsecs), (nsecs % 1000000000) / 1000, $correlation_id, $cbid, $name);
 }
 
-usdt:*:colagpu:api_synchronize {
+usdt:$1:colagpu:api_synchronize {
     $start = arg0;
     $end = arg1;
     $kind = arg2;
@@ -30,7 +30,7 @@ usdt:*:colagpu:api_synchronize {
            $kind, $kindStr, $start, $end, $dur_ns);
 }
 
-usdt:*:colagpu:activity_batch {
+usdt:$1:colagpu:activity_batch {
     $ptrs = arg0;
     $count = arg1;
 

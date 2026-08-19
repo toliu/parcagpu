@@ -19,4 +19,4 @@ while kill -0 "$TOY_PID" 2>/dev/null && ! grep -q libcolacupti "/proc/$TOY_PID/m
     sleep 0.1
 done
 
-exec bpftrace -p "$TOY_PID" "$SCRIPT_DIR/parcagpu.bt"
+exec bpftrace -p "$TOY_PID" "$SCRIPT_DIR/parcagpu.bt" "$LIB"

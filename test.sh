@@ -33,7 +33,7 @@ if [ "$USE_BPFTRACE" -eq 1 ]; then
     if command -v bpftrace &> /dev/null; then
         echo "=== Starting bpftrace to monitor DTRACE probes ==="
         # Start bpftrace in background with sudo, using tee for output redirection
-        sudo -b sh -c "bpftrace parcagpu.bt 2>&1 | tee /tmp/parcagpu_probes.log > /dev/null"
+        sudo -b sh -c "bpftrace parcagpu.bt '$(pwd)/build-local/lib/libcolacupti.so' 2>&1 | tee /tmp/parcagpu_probes.log > /dev/null"
         # Get the PID of the bpftrace process (approximate - this is the shell wrapper)
         sleep 1
         BPFTRACE_PID=$(pgrep -f "bpftrace parcagpu.bt" || echo "")
