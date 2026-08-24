@@ -12,6 +12,7 @@
 // so that _SDT_HAS_SEMAPHORES is defined first.
 #include "probes.h"
 
+#include "activity.h"
 #include "mspti.h"
 
 #include "Utility/Singleton.h"
@@ -127,6 +128,9 @@ private:
     DEBUG_PRINTF("[COLAGPU] completeBuffer called: buffer=%p validSize=%zu\n",
                  buffer, validSize);
 
+    ActivityEvent kernelEvents[ACTIVITY_BATCH_SIZE];
+    uint32_t kernelCount = 0;
+
     msptiActivity *pRecord = nullptr;
     msptiResult status =
         msptiActivityGetNextRecord(buffer, validSize, &pRecord);
@@ -146,12 +150,11 @@ private:
           DEBUG_PRINTF("[COLAGPU] Filtered kernel activity: correlationId=%u "
                        "(not in filter)\n",
                        k->correlationId);
-          // Skip both KERNEL_EXECUTED and activity_batch push. Without this,
-          // the eBPF activity_batch consumer would emit a kernel_event for
-          // every rate-limited launch, producing orphan entries in
-          // parca-agent's timesAwaitingTraces map (no cuda_correlation USDT was
-          // emitted for these correlation IDs, so no trace will ever arrive to
-          // match them).
+          // Skip kernel_timing push. Without this, the eBPF kernel_timing
+          // consumer would emit a kernel_event for every rate-limited launch,
+          // producing orphan entries in parca-agent's timesAwaitingTraces map
+          // (no cuda_correlation USDT was emitted for these correlation IDs,
+          // so no trace will ever arrive to match them).
           break;
         }
 
@@ -161,12 +164,24 @@ private:
             k->name, k->correlationId, k->ds.deviceId, k->ds.streamId, k->start,
             k->end, k->end - k->start);
 
-        // Emit USDT probe for kernel execution
-        COLAGPU_KERNEL_EXECUTED(k->start, k->end, k->correlationId,
-                                k->ds.deviceId, k->ds.streamId, 0, 0, k->name);
-        // Note: kernelTid captured via check_and_remove() above; exposed via
-        // the ACTIVITY_BATCH USDT probe on the eBPF side.
-        (void)kernelTid;
+        // Emit kernel-timing event (batched, gated by kernel switch)
+        ActivityEvent evt;
+        memset(&evt, 0, sizeof(evt));
+        evt.kind = ACTIVITY_KIND_KERNEL;
+        evt.start = k->start;
+        evt.end = k->end;
+        evt.correlationId = k->correlationId;
+        evt.deviceId = k->ds.deviceId;
+        evt.streamId = k->ds.streamId;
+        evt.name = k->name;
+        evt.tid = kernelTid;
+        if (evt.start == 0 || evt.end == 0)
+          break;
+        kernelEvents[kernelCount++] = evt;
+        if (kernelCount >= ACTIVITY_BATCH_SIZE) {
+          parcagpuKernelTiming(kernelEvents, kernelCount);
+          kernelCount = 0;
+        }
         break;
       }
       default:
@@ -175,6 +190,9 @@ private:
     }
     if (status != MSPTI_ERROR_MAX_LIMIT_REACHED)
       DEBUG_PRINTF("Consume data fail, error is %d", status);
+    if (kernelCount > 0) {
+      parcagpuKernelTiming(kernelEvents, kernelCount);
+    }
     free(buffer);
   }
 

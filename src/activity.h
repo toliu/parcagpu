@@ -25,8 +25,9 @@ typedef struct PACKED_ALIGNMENT {
   uint32_t tid;
 
   uint64_t bytes;
-  uint16_t copyKind; // Vendor-neutral copy kind: H2D=100, D2H=101, D2D=101, P2P=103
-  uint16_t sync;     // 1=synchronous, 0=asynchronous
+  uint16_t
+      copyKind;  // Vendor-neutral copy kind: H2D=100, D2H=101, D2D=101, P2P=103
+  uint16_t sync; // 1=synchronous, 0=asynchronous
 
   //    kernel
   uint32_t graphId;
@@ -34,27 +35,30 @@ typedef struct PACKED_ALIGNMENT {
   const char *name;
 } ActivityEvent;
 
-__attribute__((noinline)) void
-parcagpuActivityBatch(const ActivityEvent *events, uint32_t count) {
+__attribute__((noinline)) void parcagpuHostTiming(const ActivityEvent *events,
+                                                  uint32_t count) {
+  // Host-side timing (HOST-API / ai-launch). Gated by its own semaphore so the
+  // agent can disable this probe independently, without touching kernel timing.
+  if (!COLAGPU_HOST_TIMING_ENABLED())
+    return;
   const void *batchPtrs[ACTIVITY_BATCH_SIZE];
-
   for (uint32_t i = 0; i < count; i++) {
-    const ActivityEvent *e = &events[i];
-    if (e->kind == ACTIVITY_KIND_KERNEL) {
-      if (COLAGPU_KERNEL_EXECUTED_ENABLED()) {
-        // Emit USDT probe for kernel execution
-        COLAGPU_KERNEL_EXECUTED(e->start, e->end, e->correlationId, e->deviceId,
-                                e->streamId, e->graphId, e->graphNodeId,
-                                e->name);
-      }
-    }
-    // Note: ACTIVITY_KIND_MEMCPY events are only emitted via the batch
-    // ACTIVITY_BATCH probe (below); no individual USDT probe for memcpy.
-    batchPtrs[i] = e;
+    batchPtrs[i] = &events[i];
   }
-  if (COLAGPU_ACTIVITY_BATCH_ENABLED()) {
-    COLAGPU_ACTIVITY_BATCH(batchPtrs, count);
+  COLAGPU_HOST_TIMING(batchPtrs, count);
+}
+
+__attribute__((noinline)) void parcagpuKernelTiming(const ActivityEvent *events,
+                                                    uint32_t count) {
+  // GPU-side timing (KERNEL + MEMCPY / ai-execution + timeline). Gated by its
+  // own semaphore so the agent can disable this probe independently.
+  if (!COLAGPU_KERNEL_TIMING_ENABLED())
+    return;
+  const void *batchPtrs[ACTIVITY_BATCH_SIZE];
+  for (uint32_t i = 0; i < count; i++) {
+    batchPtrs[i] = &events[i];
   }
+  COLAGPU_KERNEL_TIMING(batchPtrs, count);
 }
 
 #endif // COLAGPU_ACTIVITY_H_

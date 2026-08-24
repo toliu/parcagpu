@@ -15,7 +15,7 @@ void CorrelationFilter::insert(uint32_t correlation_id, uint32_t tid) {
 }
 
 bool CorrelationFilter::check_and_remove(uint32_t correlation_id,
-                                          uint32_t *tid) {
+                                         uint32_t *tid) {
   std::lock_guard<std::mutex> lock(mutex_);
   auto it = map_.find(correlation_id);
   if (it != map_.end()) {
@@ -62,8 +62,9 @@ GraphCorrelationMap::GraphCorrelationMap() : current_cycle_(0) {}
 
 void GraphCorrelationMap::insert(uint32_t correlation_id, uint32_t tid) {
   std::lock_guard<std::mutex> lock(mutex_);
-  auto &entry = map_.emplace(correlation_id, GraphCorrelationEntry(current_cycle_))
-                    .first->second;
+  auto &entry =
+      map_.emplace(correlation_id, GraphCorrelationEntry(current_cycle_))
+          .first->second;
   entry.tid = tid;
 }
 

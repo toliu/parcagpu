@@ -88,139 +88,272 @@ namespace parcagpu {
 // RTLD_LOCAL.
 static const char *cudaErrorName(int code) {
   switch (code) {
-  case 1:    return "cudaErrorInvalidValue";
-  case 2:    return "cudaErrorMemoryAllocation";
-  case 3:    return "cudaErrorInitializationError";
-  case 4:    return "cudaErrorCudartUnloading";
-  case 5:    return "cudaErrorProfilerDisabled";
-  case 6:    return "cudaErrorProfilerNotInitialized";
-  case 7:    return "cudaErrorProfilerAlreadyStarted";
-  case 8:    return "cudaErrorProfilerAlreadyStopped";
-  case 9:    return "cudaErrorInvalidConfiguration";
-  case 12:   return "cudaErrorInvalidPitchValue";
-  case 13:   return "cudaErrorInvalidSymbol";
-  case 16:   return "cudaErrorInvalidHostPointer";
-  case 17:   return "cudaErrorInvalidDevicePointer";
-  case 18:   return "cudaErrorInvalidTexture";
-  case 19:   return "cudaErrorInvalidTextureBinding";
-  case 20:   return "cudaErrorInvalidChannelDescriptor";
-  case 21:   return "cudaErrorInvalidMemcpyDirection";
-  case 22:   return "cudaErrorAddressOfConstant";
-  case 23:   return "cudaErrorTextureFetchFailed";
-  case 24:   return "cudaErrorTextureNotBound";
-  case 25:   return "cudaErrorSynchronizationError";
-  case 26:   return "cudaErrorInvalidFilterSetting";
-  case 27:   return "cudaErrorInvalidNormSetting";
-  case 28:   return "cudaErrorMixedDeviceExecution";
-  case 31:   return "cudaErrorNotYetImplemented";
-  case 32:   return "cudaErrorMemoryValueTooLarge";
-  case 34:   return "cudaErrorStubLibrary";
-  case 35:   return "cudaErrorInsufficientDriver";
-  case 36:   return "cudaErrorCallRequiresNewerDriver";
-  case 37:   return "cudaErrorInvalidSurface";
-  case 43:   return "cudaErrorDuplicateVariableName";
-  case 44:   return "cudaErrorDuplicateTextureName";
-  case 45:   return "cudaErrorDuplicateSurfaceName";
-  case 46:   return "cudaErrorDevicesUnavailable";
-  case 49:   return "cudaErrorIncompatibleDriverContext";
-  case 52:   return "cudaErrorMissingConfiguration";
-  case 53:   return "cudaErrorPriorLaunchFailure";
-  case 65:   return "cudaErrorLaunchMaxDepthExceeded";
-  case 66:   return "cudaErrorLaunchFileScopedTex";
-  case 67:   return "cudaErrorLaunchFileScopedSurf";
-  case 68:   return "cudaErrorSyncDepthExceeded";
-  case 69:   return "cudaErrorLaunchPendingCountExceeded";
-  case 98:   return "cudaErrorInvalidDeviceFunction";
-  case 100:  return "cudaErrorNoDevice";
-  case 101:  return "cudaErrorInvalidDevice";
-  case 102:  return "cudaErrorDeviceNotLicensed";
-  case 103:  return "cudaErrorSoftwareValidityNotEstablished";
-  case 127:  return "cudaErrorStartupFailure";
-  case 200:  return "cudaErrorInvalidKernelImage";
-  case 201:  return "cudaErrorDeviceUninitialized";
-  case 205:  return "cudaErrorMapBufferObjectFailed";
-  case 206:  return "cudaErrorUnmapBufferObjectFailed";
-  case 207:  return "cudaErrorArrayIsMapped";
-  case 208:  return "cudaErrorAlreadyMapped";
-  case 209:  return "cudaErrorNoKernelImageForDevice";
-  case 210:  return "cudaErrorAlreadyAcquired";
-  case 211:  return "cudaErrorNotMapped";
-  case 212:  return "cudaErrorNotMappedAsArray";
-  case 213:  return "cudaErrorNotMappedAsPointer";
-  case 214:  return "cudaErrorECCUncorrectable";
-  case 215:  return "cudaErrorUnsupportedLimit";
-  case 216:  return "cudaErrorDeviceAlreadyInUse";
-  case 217:  return "cudaErrorPeerAccessUnsupported";
-  case 218:  return "cudaErrorInvalidPtx";
-  case 219:  return "cudaErrorInvalidGraphicsContext";
-  case 220:  return "cudaErrorNvlinkUncorrectable";
-  case 221:  return "cudaErrorJitCompilerNotFound";
-  case 222:  return "cudaErrorUnsupportedPtxVersion";
-  case 223:  return "cudaErrorJitCompilationDisabled";
-  case 224:  return "cudaErrorUnsupportedExecAffinity";
-  case 225:  return "cudaErrorUnsupportedDevSideSync";
-  case 226:  return "cudaErrorContained";
-  case 300:  return "cudaErrorInvalidSource";
-  case 301:  return "cudaErrorFileNotFound";
-  case 302:  return "cudaErrorSharedObjectSymbolNotFound";
-  case 303:  return "cudaErrorSharedObjectInitFailed";
-  case 304:  return "cudaErrorOperatingSystem";
-  case 400:  return "cudaErrorInvalidResourceHandle";
-  case 401:  return "cudaErrorIllegalState";
-  case 402:  return "cudaErrorLossyQuery";
-  case 500:  return "cudaErrorSymbolNotFound";
-  case 600:  return "cudaErrorNotReady";
-  case 700:  return "cudaErrorIllegalAddress";
-  case 701:  return "cudaErrorLaunchOutOfResources";
-  case 702:  return "cudaErrorLaunchTimeout";
-  case 703:  return "cudaErrorLaunchIncompatibleTexturing";
-  case 704:  return "cudaErrorPeerAccessAlreadyEnabled";
-  case 705:  return "cudaErrorPeerAccessNotEnabled";
-  case 708:  return "cudaErrorSetOnActiveProcess";
-  case 709:  return "cudaErrorContextIsDestroyed";
-  case 710:  return "cudaErrorAssert";
-  case 711:  return "cudaErrorTooManyPeers";
-  case 712:  return "cudaErrorHostMemoryAlreadyRegistered";
-  case 713:  return "cudaErrorHostMemoryNotRegistered";
-  case 714:  return "cudaErrorHardwareStackError";
-  case 715:  return "cudaErrorIllegalInstruction";
-  case 716:  return "cudaErrorMisalignedAddress";
-  case 717:  return "cudaErrorInvalidAddressSpace";
-  case 718:  return "cudaErrorInvalidPc";
-  case 719:  return "cudaErrorLaunchFailure";
-  case 720:  return "cudaErrorCooperativeLaunchTooLarge";
-  case 721:  return "cudaErrorTensorMemoryLeak";
-  case 800:  return "cudaErrorNotPermitted";
-  case 801:  return "cudaErrorNotSupported";
-  case 802:  return "cudaErrorSystemNotReady";
-  case 803:  return "cudaErrorSystemDriverMismatch";
-  case 804:  return "cudaErrorCompatNotSupportedOnDevice";
-  case 805:  return "cudaErrorMpsConnectionFailed";
-  case 806:  return "cudaErrorMpsRpcFailure";
-  case 807:  return "cudaErrorMpsServerNotReady";
-  case 808:  return "cudaErrorMpsMaxClientsReached";
-  case 809:  return "cudaErrorMpsMaxConnectionsReached";
-  case 810:  return "cudaErrorMpsClientTerminated";
-  case 811:  return "cudaErrorCdpNotSupported";
-  case 812:  return "cudaErrorCdpVersionMismatch";
-  case 900:  return "cudaErrorStreamCaptureUnsupported";
-  case 901:  return "cudaErrorStreamCaptureInvalidated";
-  case 902:  return "cudaErrorStreamCaptureMerge";
-  case 903:  return "cudaErrorStreamCaptureUnmatched";
-  case 904:  return "cudaErrorStreamCaptureUnjoined";
-  case 905:  return "cudaErrorStreamCaptureIsolation";
-  case 906:  return "cudaErrorStreamCaptureImplicit";
-  case 907:  return "cudaErrorCapturedEvent";
-  case 908:  return "cudaErrorStreamCaptureWrongThread";
-  case 909:  return "cudaErrorTimeout";
-  case 910:  return "cudaErrorGraphExecUpdateFailure";
-  case 911:  return "cudaErrorExternalDevice";
-  case 912:  return "cudaErrorInvalidClusterSize";
-  case 913:  return "cudaErrorFunctionNotLoaded";
-  case 914:  return "cudaErrorInvalidResourceType";
-  case 915:  return "cudaErrorInvalidResourceConfiguration";
-  case 999:  return "cudaErrorUnknown";
-  default:   return nullptr;
+  case 1:
+    return "cudaErrorInvalidValue";
+  case 2:
+    return "cudaErrorMemoryAllocation";
+  case 3:
+    return "cudaErrorInitializationError";
+  case 4:
+    return "cudaErrorCudartUnloading";
+  case 5:
+    return "cudaErrorProfilerDisabled";
+  case 6:
+    return "cudaErrorProfilerNotInitialized";
+  case 7:
+    return "cudaErrorProfilerAlreadyStarted";
+  case 8:
+    return "cudaErrorProfilerAlreadyStopped";
+  case 9:
+    return "cudaErrorInvalidConfiguration";
+  case 12:
+    return "cudaErrorInvalidPitchValue";
+  case 13:
+    return "cudaErrorInvalidSymbol";
+  case 16:
+    return "cudaErrorInvalidHostPointer";
+  case 17:
+    return "cudaErrorInvalidDevicePointer";
+  case 18:
+    return "cudaErrorInvalidTexture";
+  case 19:
+    return "cudaErrorInvalidTextureBinding";
+  case 20:
+    return "cudaErrorInvalidChannelDescriptor";
+  case 21:
+    return "cudaErrorInvalidMemcpyDirection";
+  case 22:
+    return "cudaErrorAddressOfConstant";
+  case 23:
+    return "cudaErrorTextureFetchFailed";
+  case 24:
+    return "cudaErrorTextureNotBound";
+  case 25:
+    return "cudaErrorSynchronizationError";
+  case 26:
+    return "cudaErrorInvalidFilterSetting";
+  case 27:
+    return "cudaErrorInvalidNormSetting";
+  case 28:
+    return "cudaErrorMixedDeviceExecution";
+  case 31:
+    return "cudaErrorNotYetImplemented";
+  case 32:
+    return "cudaErrorMemoryValueTooLarge";
+  case 34:
+    return "cudaErrorStubLibrary";
+  case 35:
+    return "cudaErrorInsufficientDriver";
+  case 36:
+    return "cudaErrorCallRequiresNewerDriver";
+  case 37:
+    return "cudaErrorInvalidSurface";
+  case 43:
+    return "cudaErrorDuplicateVariableName";
+  case 44:
+    return "cudaErrorDuplicateTextureName";
+  case 45:
+    return "cudaErrorDuplicateSurfaceName";
+  case 46:
+    return "cudaErrorDevicesUnavailable";
+  case 49:
+    return "cudaErrorIncompatibleDriverContext";
+  case 52:
+    return "cudaErrorMissingConfiguration";
+  case 53:
+    return "cudaErrorPriorLaunchFailure";
+  case 65:
+    return "cudaErrorLaunchMaxDepthExceeded";
+  case 66:
+    return "cudaErrorLaunchFileScopedTex";
+  case 67:
+    return "cudaErrorLaunchFileScopedSurf";
+  case 68:
+    return "cudaErrorSyncDepthExceeded";
+  case 69:
+    return "cudaErrorLaunchPendingCountExceeded";
+  case 98:
+    return "cudaErrorInvalidDeviceFunction";
+  case 100:
+    return "cudaErrorNoDevice";
+  case 101:
+    return "cudaErrorInvalidDevice";
+  case 102:
+    return "cudaErrorDeviceNotLicensed";
+  case 103:
+    return "cudaErrorSoftwareValidityNotEstablished";
+  case 127:
+    return "cudaErrorStartupFailure";
+  case 200:
+    return "cudaErrorInvalidKernelImage";
+  case 201:
+    return "cudaErrorDeviceUninitialized";
+  case 205:
+    return "cudaErrorMapBufferObjectFailed";
+  case 206:
+    return "cudaErrorUnmapBufferObjectFailed";
+  case 207:
+    return "cudaErrorArrayIsMapped";
+  case 208:
+    return "cudaErrorAlreadyMapped";
+  case 209:
+    return "cudaErrorNoKernelImageForDevice";
+  case 210:
+    return "cudaErrorAlreadyAcquired";
+  case 211:
+    return "cudaErrorNotMapped";
+  case 212:
+    return "cudaErrorNotMappedAsArray";
+  case 213:
+    return "cudaErrorNotMappedAsPointer";
+  case 214:
+    return "cudaErrorECCUncorrectable";
+  case 215:
+    return "cudaErrorUnsupportedLimit";
+  case 216:
+    return "cudaErrorDeviceAlreadyInUse";
+  case 217:
+    return "cudaErrorPeerAccessUnsupported";
+  case 218:
+    return "cudaErrorInvalidPtx";
+  case 219:
+    return "cudaErrorInvalidGraphicsContext";
+  case 220:
+    return "cudaErrorNvlinkUncorrectable";
+  case 221:
+    return "cudaErrorJitCompilerNotFound";
+  case 222:
+    return "cudaErrorUnsupportedPtxVersion";
+  case 223:
+    return "cudaErrorJitCompilationDisabled";
+  case 224:
+    return "cudaErrorUnsupportedExecAffinity";
+  case 225:
+    return "cudaErrorUnsupportedDevSideSync";
+  case 226:
+    return "cudaErrorContained";
+  case 300:
+    return "cudaErrorInvalidSource";
+  case 301:
+    return "cudaErrorFileNotFound";
+  case 302:
+    return "cudaErrorSharedObjectSymbolNotFound";
+  case 303:
+    return "cudaErrorSharedObjectInitFailed";
+  case 304:
+    return "cudaErrorOperatingSystem";
+  case 400:
+    return "cudaErrorInvalidResourceHandle";
+  case 401:
+    return "cudaErrorIllegalState";
+  case 402:
+    return "cudaErrorLossyQuery";
+  case 500:
+    return "cudaErrorSymbolNotFound";
+  case 600:
+    return "cudaErrorNotReady";
+  case 700:
+    return "cudaErrorIllegalAddress";
+  case 701:
+    return "cudaErrorLaunchOutOfResources";
+  case 702:
+    return "cudaErrorLaunchTimeout";
+  case 703:
+    return "cudaErrorLaunchIncompatibleTexturing";
+  case 704:
+    return "cudaErrorPeerAccessAlreadyEnabled";
+  case 705:
+    return "cudaErrorPeerAccessNotEnabled";
+  case 708:
+    return "cudaErrorSetOnActiveProcess";
+  case 709:
+    return "cudaErrorContextIsDestroyed";
+  case 710:
+    return "cudaErrorAssert";
+  case 711:
+    return "cudaErrorTooManyPeers";
+  case 712:
+    return "cudaErrorHostMemoryAlreadyRegistered";
+  case 713:
+    return "cudaErrorHostMemoryNotRegistered";
+  case 714:
+    return "cudaErrorHardwareStackError";
+  case 715:
+    return "cudaErrorIllegalInstruction";
+  case 716:
+    return "cudaErrorMisalignedAddress";
+  case 717:
+    return "cudaErrorInvalidAddressSpace";
+  case 718:
+    return "cudaErrorInvalidPc";
+  case 719:
+    return "cudaErrorLaunchFailure";
+  case 720:
+    return "cudaErrorCooperativeLaunchTooLarge";
+  case 721:
+    return "cudaErrorTensorMemoryLeak";
+  case 800:
+    return "cudaErrorNotPermitted";
+  case 801:
+    return "cudaErrorNotSupported";
+  case 802:
+    return "cudaErrorSystemNotReady";
+  case 803:
+    return "cudaErrorSystemDriverMismatch";
+  case 804:
+    return "cudaErrorCompatNotSupportedOnDevice";
+  case 805:
+    return "cudaErrorMpsConnectionFailed";
+  case 806:
+    return "cudaErrorMpsRpcFailure";
+  case 807:
+    return "cudaErrorMpsServerNotReady";
+  case 808:
+    return "cudaErrorMpsMaxClientsReached";
+  case 809:
+    return "cudaErrorMpsMaxConnectionsReached";
+  case 810:
+    return "cudaErrorMpsClientTerminated";
+  case 811:
+    return "cudaErrorCdpNotSupported";
+  case 812:
+    return "cudaErrorCdpVersionMismatch";
+  case 900:
+    return "cudaErrorStreamCaptureUnsupported";
+  case 901:
+    return "cudaErrorStreamCaptureInvalidated";
+  case 902:
+    return "cudaErrorStreamCaptureMerge";
+  case 903:
+    return "cudaErrorStreamCaptureUnmatched";
+  case 904:
+    return "cudaErrorStreamCaptureUnjoined";
+  case 905:
+    return "cudaErrorStreamCaptureIsolation";
+  case 906:
+    return "cudaErrorStreamCaptureImplicit";
+  case 907:
+    return "cudaErrorCapturedEvent";
+  case 908:
+    return "cudaErrorStreamCaptureWrongThread";
+  case 909:
+    return "cudaErrorTimeout";
+  case 910:
+    return "cudaErrorGraphExecUpdateFailure";
+  case 911:
+    return "cudaErrorExternalDevice";
+  case 912:
+    return "cudaErrorInvalidClusterSize";
+  case 913:
+    return "cudaErrorFunctionNotLoaded";
+  case 914:
+    return "cudaErrorInvalidResourceType";
+  case 915:
+    return "cudaErrorInvalidResourceConfiguration";
+  case 999:
+    return "cudaErrorUnknown";
+  default:
+    return nullptr;
   }
 }
 
@@ -625,12 +758,10 @@ private:
     int recordCount = 0;
     int filteredCount = 0;
 
-    // Batch probe: collect ActivityEvent structs and pass them to
-    // BPF/USDT every ACTIVITY_BATCH_SIZE records. Stack-allocated — no heap
-    // allocation. The parcagpuActivityBatch function handles both individual
-    // KERNEL_EXECUTED probes and the batch ACTIVITY_BATCH probe.
-    ActivityEvent batchEvents[ACTIVITY_BATCH_SIZE];
-    uint32_t batchCount = 0;
+    ActivityEvent hostEvents[ACTIVITY_BATCH_SIZE];
+    uint32_t hostCount = 0;
+    ActivityEvent kernelEvents[ACTIVITY_BATCH_SIZE];
+    uint32_t kernelCount = 0;
 
     DEBUG_PRINTF(
         "[COLAGPU] completeBuffer called: ctx=%p buffer=%p validSize=%zu\n",
@@ -653,7 +784,7 @@ private:
 
       recordCount++;
 
-      ActivityEvent &evt = batchEvents[batchCount];
+      ActivityEvent evt;
       memset(&evt, 0, sizeof(evt));
       switch (record->kind) {
       case CUPTI_ACTIVITY_KIND_CONCURRENT_KERNEL:
@@ -678,12 +809,6 @@ private:
           DEBUG_PRINTF("[COLAGPU] Filtered kernel activity: correlationId=%u "
                        "graphId=%u (not in filter)\n",
                        k->correlationId, k->graphId);
-          // Skip both KERNEL_EXECUTED and activity_batch push. Without this,
-          // the eBPF activity_batch consumer would emit a kernel_event for
-          // every rate-limited launch, producing orphan entries in
-          // parca-agent's timesAwaitingTraces map (no cuda_correlation USDT was
-          // emitted for these correlation IDs, so no trace will ever arrive to
-          // match them).
           break;
         }
 
@@ -704,6 +829,13 @@ private:
         evt.graphNodeId = k->graphNodeId;
         evt.name = k->name;
         evt.tid = kernelTid;
+        if (evt.start == 0 || evt.end == 0)
+          break;
+        kernelEvents[kernelCount++] = evt;
+        if (kernelCount >= ACTIVITY_BATCH_SIZE) {
+          parcagpuKernelTiming(kernelEvents, kernelCount);
+          kernelCount = 0;
+        }
         break;
       }
       case CUPTI_ACTIVITY_KIND_RUNTIME:
@@ -734,6 +866,13 @@ private:
         evt.start = api->start;
         evt.end = api->end;
         evt.correlationId = api->correlationId;
+        if (evt.start == 0 || evt.end == 0)
+          break;
+        hostEvents[hostCount++] = evt;
+        if (hostCount >= ACTIVITY_BATCH_SIZE) {
+          parcagpuHostTiming(hostEvents, hostCount);
+          hostCount = 0;
+        }
         break;
       }
       case CUPTI_ACTIVITY_KIND_MEMCPY: {
@@ -764,20 +903,20 @@ private:
         // PTOP=10→103(P2P).  All other copyKind values are discarded.
         uint16_t mappedCopyKind = 0;
         switch (m->copyKind) {
-          case CUPTI_ACTIVITY_MEMCPY_KIND_HTOD:
-            mappedCopyKind = 100;
-            break;
-          case CUPTI_ACTIVITY_MEMCPY_KIND_DTOH:
-            mappedCopyKind = 101;
-            break;
-          case CUPTI_ACTIVITY_MEMCPY_KIND_DTOD:
-            mappedCopyKind = 101;
-            break;
-          case CUPTI_ACTIVITY_MEMCPY_KIND_PTOP:
-            mappedCopyKind = 103;
-            break;
-          default:
-            break;
+        case CUPTI_ACTIVITY_MEMCPY_KIND_HTOD:
+          mappedCopyKind = 100;
+          break;
+        case CUPTI_ACTIVITY_MEMCPY_KIND_DTOH:
+          mappedCopyKind = 101;
+          break;
+        case CUPTI_ACTIVITY_MEMCPY_KIND_DTOD:
+          mappedCopyKind = 101;
+          break;
+        case CUPTI_ACTIVITY_MEMCPY_KIND_PTOP:
+          mappedCopyKind = 103;
+          break;
+        default:
+          break;
         }
         if (mappedCopyKind == 0) {
           DEBUG_PRINTF(
@@ -796,6 +935,13 @@ private:
         evt.copyKind = mappedCopyKind;
         evt.sync = (m->flags & CUPTI_ACTIVITY_FLAG_MEMCPY_ASYNC) ? 0 : 1;
         evt.tid = found ? info.tid : 0;
+        if (evt.start == 0 || evt.end == 0)
+          break;
+        kernelEvents[kernelCount++] = evt;
+        if (kernelCount >= ACTIVITY_BATCH_SIZE) {
+          parcagpuKernelTiming(kernelEvents, kernelCount);
+          kernelCount = 0;
+        }
         break;
       }
       case CUPTI_ACTIVITY_KIND_MEMCPY2: {
@@ -834,6 +980,13 @@ private:
         evt.copyKind = 103;
         evt.sync = (m->flags & CUPTI_ACTIVITY_FLAG_MEMCPY_ASYNC) ? 0 : 1;
         evt.tid = found ? info.tid : 0;
+        if (evt.start == 0 || evt.end == 0)
+          break;
+        kernelEvents[kernelCount++] = evt;
+        if (kernelCount >= ACTIVITY_BATCH_SIZE) {
+          parcagpuKernelTiming(kernelEvents, kernelCount);
+          kernelCount = 0;
+        }
         break;
       }
       default: {
@@ -842,21 +995,14 @@ private:
         break;
       }
       }
-
-      if (evt.kind == 0 || evt.start == 0 || evt.end == 0) {
-        continue;
-      }
-      batchCount++;
-
-      if (batchCount >= ACTIVITY_BATCH_SIZE) {
-        parcagpuActivityBatch(batchEvents, batchCount);
-        batchCount = 0;
-      }
     }
 
-    // Flush remaining batch
-    if (batchCount > 0) {
-      parcagpuActivityBatch(batchEvents, batchCount);
+    // Flush remaining batches
+    if (hostCount > 0) {
+      parcagpuHostTiming(hostEvents, hostCount);
+    }
+    if (kernelCount > 0) {
+      parcagpuKernelTiming(kernelEvents, kernelCount);
     }
 
     // End cycle - cleanup completed graph entries
@@ -1081,8 +1227,9 @@ private:
 
           // Capture pid/tid for memcpy activity correlation: only runtime
           // cudaMemcpy/cudaMemcpyAsync callbacks need this; kernel launches
-          // and other APIs are irrelevant.
-          if (isMemcpyRuntimeCbid(cbid)) {
+          // and other APIs are irrelevant. Gated on the kernel-timing
+          // semaphore — memcpy pid/tid only feeds kernel_timing events.
+          if (isMemcpyRuntimeCbid(cbid) && COLAGPU_KERNEL_TIMING_ENABLED()) {
             g_memcpyCorrelationMap.insert(correlationId, (uint32_t)getpid(),
                                           (uint32_t)syscall(SYS_gettid));
             // Prune stale entries to bound memory.
@@ -1137,13 +1284,14 @@ private:
         uint32_t launchTid = (uint32_t)syscall(SYS_gettid);
         if (isGraphLaunch) {
           g_graphCorrelationMap.insert(correlationId, launchTid);
-          DEBUG_PRINTF("[COLAGPU] Inserted correlationId=%u into graph map (tid=%u)\n",
-                       correlationId, launchTid);
+          DEBUG_PRINTF(
+              "[COLAGPU] Inserted correlationId=%u into graph map (tid=%u)\n",
+              correlationId, launchTid);
         } else {
           g_correlationFilter.insert(correlationId, launchTid);
-          DEBUG_PRINTF(
-              "[COLAGPU] Inserted correlationId=%u into correlation filter (tid=%u)\n",
-              correlationId, launchTid);
+          DEBUG_PRINTF("[COLAGPU] Inserted correlationId=%u into correlation "
+                       "filter (tid=%u)\n",
+                       correlationId, launchTid);
         }
 
         // Flush if too many events pile up
