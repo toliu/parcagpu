@@ -91,8 +91,8 @@ struct ConfigureData {
   uint32_t *stallReasonIndices{};
   std::map<size_t, size_t> stallReasonIndexToMetricIndex{};
   std::set<size_t> notIssuedStallReasonIndices{};
-  CUpti_PCSamplingData pcSamplingData{};       // registered with CUPTI config
-  CUpti_PCSamplingData outputData{};           // separate buffer for getData calls
+  CUpti_PCSamplingData pcSamplingData{}; // registered with CUPTI config
+  CUpti_PCSamplingData outputData{};     // separate buffer for getData calls
   std::vector<CUpti_PCSamplingConfigurationInfo> configurationInfos;
 };
 
@@ -105,7 +105,7 @@ public:
   ~PCSampling() = default;
 
   // Check if PC sampling is supported (CUPTI >= 12.8.1).
-  // Enabled by default; set PARCAGPU_SAMPLING_FACTOR=0 to disable.
+  // Enabled by default; set COLAGPU_SAMPLING_FACTOR=0 to disable.
   static bool isSupported();
 
   void initialize(CUcontext context);
@@ -191,4 +191,4 @@ void fireError(int32_t code, const char *message, const char *component);
 
 } // namespace parcagpu
 
-#endif // PARCAGPU_PC_SAMPLING_H_
+#endif // COLAGPU_PC_SAMPLING_H_

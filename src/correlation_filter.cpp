@@ -9,24 +9,41 @@ namespace parcagpu {
 // CorrelationFilter implementation
 //=============================================================================
 
-void CorrelationFilter::insert(uint32_t correlation_id) {
+void CorrelationFilter::insert(uint32_t correlation_id, uint32_t tid) {
   std::lock_guard<std::mutex> lock(mutex_);
-  set_.insert(correlation_id);
+  map_[correlation_id] = tid;
 }
 
-bool CorrelationFilter::check_and_remove(uint32_t correlation_id) {
+bool CorrelationFilter::check_and_remove(uint32_t correlation_id,
+                                         uint32_t *tid) {
   std::lock_guard<std::mutex> lock(mutex_);
-  auto it = set_.find(correlation_id);
-  if (it != set_.end()) {
-    set_.erase(it);
+  auto it = map_.find(correlation_id);
+  if (it != map_.end()) {
+    *tid = it->second;
+    map_.erase(it);
     return true;
   }
   return false;
 }
 
+void CorrelationFilter::trim(uint32_t threshold) {
+  std::lock_guard<std::mutex> lock(mutex_);
+  if (threshold == 0) {
+    map_.clear();
+    return;
+  }
+  for (auto it = map_.begin(); it != map_.end();) {
+    if (it->first < threshold) {
+      it = map_.erase(it);
+    } else {
+      ++it;
+    }
+  }
+}
+
 size_t CorrelationFilter::size() const {
   std::lock_guard<std::mutex> lock(mutex_);
-  return set_.size();
+  return map_.size();
 }
 
 //=============================================================================
@@ -35,7 +52,7 @@ size_t CorrelationFilter::size() const {
 
 GraphCorrelationEntry::GraphCorrelationEntry(uint32_t cycle)
     : state{GRAPH_STATE_UNINITIALIZED, GRAPH_STATE_UNINITIALIZED},
-      ever_seen_kernel(false), insertion_cycle(cycle) {}
+      ever_seen_kernel(false), insertion_cycle(cycle), tid(0) {}
 
 //=============================================================================
 // GraphCorrelationMap implementation
@@ -43,9 +60,12 @@ GraphCorrelationEntry::GraphCorrelationEntry(uint32_t cycle)
 
 GraphCorrelationMap::GraphCorrelationMap() : current_cycle_(0) {}
 
-void GraphCorrelationMap::insert(uint32_t correlation_id) {
+void GraphCorrelationMap::insert(uint32_t correlation_id, uint32_t tid) {
   std::lock_guard<std::mutex> lock(mutex_);
-  map_.emplace(correlation_id, GraphCorrelationEntry(current_cycle_));
+  auto &entry =
+      map_.emplace(correlation_id, GraphCorrelationEntry(current_cycle_))
+          .first->second;
+  entry.tid = tid;
 }
 
 void GraphCorrelationMap::cycle_start(uint32_t cycle) {
@@ -58,13 +78,14 @@ void GraphCorrelationMap::cycle_start(uint32_t cycle) {
 }
 
 bool GraphCorrelationMap::check_and_mark_seen(uint32_t correlation_id,
-                                               uint32_t cycle) {
+                                              uint32_t cycle, uint32_t *tid) {
   std::lock_guard<std::mutex> lock(mutex_);
   auto it = map_.find(correlation_id);
   if (it != map_.end()) {
     uint32_t slot = cycle % 2;
     it->second.state[slot] = GRAPH_STATE_KERNEL_SEEN;
     it->second.ever_seen_kernel = true;
+    *tid = it->second.tid;
     return true;
   }
   return false;
@@ -93,6 +114,48 @@ void GraphCorrelationMap::cycle_end() {
 }
 
 size_t GraphCorrelationMap::size() const {
+  std::lock_guard<std::mutex> lock(mutex_);
+  return map_.size();
+}
+
+//=============================================================================
+// MemcpyCorrelationMap implementation
+//=============================================================================
+
+void MemcpyCorrelationMap::insert(uint32_t correlation_id, uint32_t pid,
+                                  uint32_t tid) {
+  std::lock_guard<std::mutex> lock(mutex_);
+  map_[correlation_id] = Info{pid, tid};
+}
+
+bool MemcpyCorrelationMap::check_and_remove(uint32_t correlation_id,
+                                            Info *out) {
+  std::lock_guard<std::mutex> lock(mutex_);
+  auto it = map_.find(correlation_id);
+  if (it != map_.end()) {
+    *out = it->second;
+    map_.erase(it);
+    return true;
+  }
+  return false;
+}
+
+void MemcpyCorrelationMap::trim(uint32_t threshold) {
+  std::lock_guard<std::mutex> lock(mutex_);
+  if (threshold == 0) {
+    map_.clear();
+    return;
+  }
+  for (auto it = map_.begin(); it != map_.end();) {
+    if (it->first < threshold) {
+      it = map_.erase(it);
+    } else {
+      ++it;
+    }
+  }
+}
+
+size_t MemcpyCorrelationMap::size() const {
   std::lock_guard<std::mutex> lock(mutex_);
   return map_.size();
 }

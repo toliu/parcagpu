@@ -1,41 +1,26 @@
-.PHONY: all clean test build-amd64 build-arm64 build-all cross docker-push docker-test-build docker-test-run format local debug generate bpf-test microbenchmarks test-multi test-pc-real test-pc-mock
+.PHONY: all clean test cross docker-push docker-test-build docker-test-run format local debug generate bpf-test microbenchmarks test-multi test-pc-real test-pc-mock
 
-LIB_NAME = libparcagpucupti.so
+# LIB_NAME = libcolacupti.so
 
 # Default target: build for both architectures
-all: build-all
+all: build-amd64 build-arm64
 
-# Build libparcagpucupti.so for AMD64 using Docker
-build-amd64:
-	@echo "=== Building $(LIB_NAME) for AMD64 with Docker ==="
-	@mkdir -p /tmp/parcagpu-build-amd64
-	@docker buildx create --name parcagpu-builder --use --bootstrap 2>/dev/null || docker buildx use parcagpu-builder
+# Pattern rule: build-<arch> (e.g., build-amd64, build-arm64)
+build-%:
+	@echo "=== Building for $* with Docker ==="
+	@mkdir -p /tmp/parcagpu-build-$*
+	@docker buildx create --name parcagpu-builder --use --bootstrap \
+		--driver-opt "network=host" \
+		--driver-opt "env.HTTP_PROXY=http://proxy.colasoft.cn:1282" \
+		--driver-opt "env.HTTPS_PROXY=http://proxy.colasoft.cn:1282" \
+		--driver-opt "env.NO_PROXY=localhost"  2>/dev/null || docker buildx use parcagpu-builder
 	@docker buildx build -f Dockerfile \
 		--target export \
-		--output type=local,dest=/tmp/parcagpu-build-amd64 \
-		--platform linux/amd64 .
-	@mkdir -p build/amd64
-	@cp /tmp/parcagpu-build-amd64/$(LIB_NAME) build/amd64/
-	@echo "AMD64 library built: build/amd64/$(LIB_NAME)"
-
-# Build libparcagpucupti.so for ARM64 using Docker
-build-arm64:
-	@echo "=== Building $(LIB_NAME) for ARM64 with Docker ==="
-	@mkdir -p /tmp/parcagpu-build-arm64
-	@docker buildx create --name parcagpu-builder --use --bootstrap 2>/dev/null || docker buildx use parcagpu-builder
-	@docker buildx build -f Dockerfile \
-		--target export \
-		--output type=local,dest=/tmp/parcagpu-build-arm64 \
-		--platform linux/arm64 .
-	@mkdir -p build/arm64
-	@cp /tmp/parcagpu-build-arm64/$(LIB_NAME) build/arm64/
-	@echo "ARM64 library built: build/arm64/$(LIB_NAME)"
-
-# Build both architectures
-build-all: build-amd64 build-arm64
-	@echo "=== All artifacts built ==="
-	@echo "AMD64: build/amd64/$(LIB_NAME)"
-	@echo "ARM64: build/arm64/$(LIB_NAME)"
+		--output type=local,dest=/tmp/parcagpu-build-$* \
+		--platform linux/$* .
+	@mkdir -p build/$*
+	@cp /tmp/parcagpu-build-$*/libcola*.so build/$*/
+	@echo "$* library built: build/$*/"
 
 # Build runtime container image for both architectures
 # Multi-platform images stay in buildx cache. Use docker-push to push to registry.
@@ -53,20 +38,20 @@ local:
 	@echo "=== Building locally with CMake (RelWithDebInfo) ==="
 	@cmake -B build-local -S . -DCMAKE_BUILD_TYPE=RelWithDebInfo
 	@cmake --build build-local
-	@echo "Local build complete: build-local/lib/$(LIB_NAME)"
+	@echo "Local build complete: build-local/lib/"
 
 # Debug build with CMake (full debug, no optimizations)
 debug:
 	@echo "=== Building debug version with CMake ==="
 	@cmake -B build-local -S . -DCMAKE_BUILD_TYPE=Debug
 	@cmake --build build-local
-	@echo "Debug build complete: build-local/lib/$(LIB_NAME)"
+	@echo "Debug build complete: build-local/lib/"
 
 # Run local tests
 test: local
 	@echo "=== Running tests ==="
 	@LD_LIBRARY_PATH="$(CURDIR)/build-local/lib:$$LD_LIBRARY_PATH" \
-		./build-local/bin/test_cupti_prof build-local/lib/libparcagpucupti.so --duration=5
+		./build-local/bin/test_cupti_prof build-local/lib/libcolacupti.so --duration=5
 
 # Clean build artifacts
 clean:
@@ -139,7 +124,7 @@ bpf-test: generate
 # Requires root (sudo) for BPF.
 test-multi: local bpf-test
 	@echo "=== Running test with BPF activity parser ==="
-	@LIB_PATH="build-local/lib/libparcagpucupti.so"; \
+	@LIB_PATH="build-local/lib/libcolacupti.so"; \
 	export LD_LIBRARY_PATH="$(CURDIR)/build-local/lib:$$LD_LIBRARY_PATH"; \
 	./build-local/bin/test_cupti_prof "$${LIB_PATH}" --kernel-names=kernel_names.txt --duration=10 & \
 	TEST_PID=$$!; \

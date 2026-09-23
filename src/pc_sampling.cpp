@@ -1,9 +1,9 @@
 // Copyright 2026 The Parca Authors
 // SPDX-License-Identifier: Apache-2.0
 
+#include "pc_sampling.h"
 #include "Driver/GPU/CudaApi.h"
 #include "Driver/GPU/CuptiApi.h"
-#include "pc_sampling.h"
 #include "probes.h"
 #include <cstdio>
 #include <cstdlib>
@@ -27,17 +27,17 @@ namespace parcagpu {
 // different argument encodings, which complicates BPF attachment.
 __attribute__((noinline)) void fireCubinLoaded(uint64_t crc, const char *cubin,
                                                uint64_t size) {
-  PARCAGPU_CUBIN_LOADED(crc, cubin, size);
+  COLAGPU_CUBIN_LOADED(crc, cubin, size);
 }
 
 __attribute__((noinline)) void fireCubinUnloaded(uint64_t crc) {
-  PARCAGPU_CUBIN_UNLOADED(crc);
+  COLAGPU_CUBIN_UNLOADED(crc);
 }
 
 __attribute__((noinline)) void fireGpuConfig(uint32_t dev, uint32_t factor,
                                              uint32_t clockKHz,
                                              uint32_t smCount) {
-  PARCAGPU_GPU_CONFIG(dev, factor, clockKHz, smCount);
+  COLAGPU_GPU_CONFIG(dev, factor, clockKHz, smCount);
 }
 
 static uint64_t emitMetadataNowNs();
@@ -45,9 +45,9 @@ static uint64_t emitMetadataNowNs();
 // Max records per pc_sample_batch probe invocation.
 static constexpr uint32_t PCSampleBatchSize = 128;
 
-__attribute__((noinline)) void firePCSampleBatch(
-    const void **ptrs, uint32_t count) {
-  PARCAGPU_PC_SAMPLE_BATCH(ptrs, count);
+__attribute__((noinline)) void firePCSampleBatch(const void **ptrs,
+                                                 uint32_t count) {
+  COLAGPU_PC_SAMPLE_BATCH(ptrs, count);
 }
 
 namespace {
@@ -194,20 +194,20 @@ void doubleCheckedLock(CheckFn check, std::mutex &mutex, ActionFn action) {
 // Helper to get PARCAGPU's custom sampling frequency from environment
 uint32_t getGPUSamplingFrequency() {
   // Default frequency for PARCAGPU is 20 (Proton uses 10)
-  constexpr uint32_t PARCAGPU_DEFAULT_FREQUENCY = 20;
+  constexpr uint32_t COLAGPU_DEFAULT_FREQUENCY = 20;
 
-  uint32_t samplingPeriod = PARCAGPU_DEFAULT_FREQUENCY;
-  const char *sampling_factor_env = getenv("PARCAGPU_SAMPLING_FACTOR");
+  uint32_t samplingPeriod = COLAGPU_DEFAULT_FREQUENCY;
+  const char *sampling_factor_env = getenv("COLAGPU_SAMPLING_FACTOR");
   if (sampling_factor_env) {
     int factor = atoi(sampling_factor_env);
     if (factor >= 5 && factor <= 31) {
       samplingPeriod = factor;
-      DEBUG_PRINTF("Using PARCAGPU_SAMPLING_FACTOR=%u\n", samplingPeriod);
+      DEBUG_PRINTF("Using COLAGPU_SAMPLING_FACTOR=%u\n", samplingPeriod);
     } else if (factor != 0) {
       fprintf(stderr,
-              "[PARCAGPU] Warning: PARCAGPU_SAMPLING_FACTOR=%d out of range "
+              "[COLAGPU] Warning: COLAGPU_SAMPLING_FACTOR=%d out of range "
               "[5,31], using default %u\n",
-              factor, PARCAGPU_DEFAULT_FREQUENCY);
+              factor, COLAGPU_DEFAULT_FREQUENCY);
     }
   }
   return samplingPeriod;
@@ -409,12 +409,13 @@ void ConfigureData::initialize(CUcontext context) {
 // GPUPCSampling implementation
 
 bool PCSampling::isSupported() {
-  // PC sampling is off by default. Setting PARCAGPU_PC_SAMPLING_RATE to a
+  // PC sampling is off by default. Setting COLAGPU_PC_SAMPLING_RATE to a
   // non-negative number opts in; the user does not need to also set
-  // PARCAGPU_SAMPLING_FACTOR (it has a default).
-  const char *env = getenv("PARCAGPU_PC_SAMPLING_RATE");
+  // COLAGPU_SAMPLING_FACTOR (it has a default).
+  const char *env = getenv("COLAGPU_PC_SAMPLING_RATE");
   if (!env) {
-    DEBUG_PRINTF("PC sampling disabled (set PARCAGPU_PC_SAMPLING_RATE to enable)\n");
+    DEBUG_PRINTF(
+        "PC sampling disabled (set COLAGPU_PC_SAMPLING_RATE to enable)\n");
     return false;
   }
 
@@ -462,7 +463,8 @@ bool PCSampling::isSupported() {
   // so we defer the real check to initialize() where enablePCSampling()
   // will fail with a CUPTI error if permissions are insufficient.
   // TODO: Add explicit permission pre-check.
-  // Reference: https://developer.nvidia.com/nvidia-development-tools-solutions-err_nvgpuctrperm-permission-issue-performance-counters
+  // Reference:
+  // https://developer.nvidia.com/nvidia-development-tools-solutions-err_nvgpuctrperm-permission-issue-performance-counters
 
   int major = driverVersion / 1000;
   int minor = (driverVersion % 1000) / 10;
@@ -498,8 +500,7 @@ void PCSampling::initialize(CUcontext context) {
             /*pPriv=*/NULL,
             /*ctx=*/context,
         };
-        auto result =
-            proton::cupti::pcSamplingEnable<false>(&enableParams);
+        auto result = proton::cupti::pcSamplingEnable<false>(&enableParams);
         if (result != CUPTI_SUCCESS) {
           DEBUG_PRINTF(
               "Failed to enable PC sampling for context %u: CUPTI error %d\n"
@@ -574,7 +575,7 @@ void PCSampling::stop(CUcontext context) {
 
 __attribute__((noinline)) void fireError(int32_t code, const char *message,
                                          const char *component) {
-  PARCAGPU_ERROR(code, message, component);
+  COLAGPU_ERROR(code, message, component);
 }
 
 void PCSampling::processPCSamplingData(ConfigureData *configureData) {
@@ -691,26 +692,25 @@ void PCSampling::emitMetadata() {
   }
 
   // Stall reason map (small, ~4KB) — no per-entry state needed.
-  const uint16_t stallSem = readSem(parcagpu_stall_reason_map_semaphore);
+  const uint16_t stallSem = readSem(colagpu_stall_reason_map_semaphore);
   const uint16_t prevStall =
       prevStallSem.exchange(stallSem, std::memory_order_acq_rel);
   const bool stallJoin = stallSem > prevStall;
   if (stallReasonMap.data() && stallSem > 0 && (stallJoin || refresh)) {
-    PARCAGPU_STALL_REASON_MAP(stallReasonMap.data(),
-                              stallReasonMap.numEntries());
+    COLAGPU_STALL_REASON_MAP(stallReasonMap.data(),
+                             stallReasonMap.numEntries());
   }
 
   // Cubin loaded — re-fire all cubins on a consumer-join (count increase);
   // on a periodic refresh, re-fire only entries that have gone stale.
-  const uint16_t cubinSem = readSem(parcagpu_cubin_loaded_semaphore);
+  const uint16_t cubinSem = readSem(colagpu_cubin_loaded_semaphore);
   const uint16_t prevCubin =
       prevCubinSem.exchange(cubinSem, std::memory_order_acq_rel);
   const bool cubinJoin = cubinSem > prevCubin;
   if (cubinSem > 0 && (cubinJoin || refresh)) {
     std::lock_guard<std::mutex> lock(contextMutex);
     for (auto &ref : loadedCubins) {
-      if (cubinJoin ||
-          (nowNs - ref.lastEmittedNs) > kEmitRefreshPeriodNs) {
+      if (cubinJoin || (nowNs - ref.lastEmittedNs) > kEmitRefreshPeriodNs) {
         fireCubinLoaded(ref.crc, ref.data, ref.size);
         ref.lastEmittedNs = nowNs;
       }
@@ -718,15 +718,14 @@ void PCSampling::emitMetadata() {
   }
 
   // GPU config — same edge-on-consumer-join + stale-refresh pattern as cubins.
-  const uint16_t cfgSem = readSem(parcagpu_gpu_config_semaphore);
+  const uint16_t cfgSem = readSem(colagpu_gpu_config_semaphore);
   const uint16_t prevCfg =
       prevConfigSem.exchange(cfgSem, std::memory_order_acq_rel);
   const bool cfgJoin = cfgSem > prevCfg;
   if (cfgSem > 0 && (cfgJoin || refresh)) {
     std::lock_guard<std::mutex> lock(contextMutex);
     for (auto &ref : loadedConfigs) {
-      if (cfgJoin ||
-          (nowNs - ref.lastEmittedNs) > kEmitRefreshPeriodNs) {
+      if (cfgJoin || (nowNs - ref.lastEmittedNs) > kEmitRefreshPeriodNs) {
         fireGpuConfig(ref.dev, ref.samplingFactor, ref.clockKHz, ref.smCount);
         ref.lastEmittedNs = nowNs;
       }
@@ -788,7 +787,8 @@ void PCSampling::collectData(CUcontext context) {
       // probe released; finalize() + initialize() each take their own
       // locks (contextMutex, and pcSamplingMutex internally).
       DEBUG_PRINTF("Recovering from CUPTI_ERROR_OUT_OF_MEMORY: full reinit on "
-                   "ctx=%p (disable+enable to clear wedged state)\n", context);
+                   "ctx=%p (disable+enable to clear wedged state)\n",
+                   context);
       finalize(context);
       initialize(context);
     }

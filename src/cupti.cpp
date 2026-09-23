@@ -1,17 +1,21 @@
 // Copyright 2026 The Parca Authors
 // SPDX-License-Identifier: Apache-2.0
 
+#include <algorithm>
 #include <atomic>
+#include <chrono>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <dlfcn.h>
+#include <fstream>
+#include <sys/syscall.h>
+#include <thread>
 #include <time.h>
 #include <unistd.h>
 
-// USDT probes — must come before any header that might include <sys/sdt.h>,
-// so that _SDT_HAS_SEMAPHORES is defined first.
-#include "probes.h"
+#include "activity.h"
 
 // Include proton headers
 #include "Driver/GPU/CuptiApi.h"
@@ -20,9 +24,340 @@
 #include "correlation_filter.h"
 #include "env_config.h"
 #include "pc_sampling.h"
-#include "token_bucket.h"
+
+constexpr std::array<CUpti_CallbackId, 4> kSynchronizeCallbacks = {
+    CUPTI_DRIVER_TRACE_CBID_cuStreamSynchronize,
+    CUPTI_DRIVER_TRACE_CBID_cuCtxSynchronize,
+    CUPTI_DRIVER_TRACE_CBID_cuEventSynchronize,
+    CUPTI_DRIVER_TRACE_CBID_cuStreamSynchronize_ptsz};
+
+// Runtime memcpy CBIDs — enable so the callback handler can capture pid/tid
+// on every cudaMemcpy/cudaMemcpyAsync EXIT, then bridge them to activity
+// records via MemcpyCorrelationMap. Without these callbacks firing, the map
+// is never populated and pid/tid in memcpy events stay 0.
+constexpr std::array<CUpti_CallbackId, 4> kMemcpyRuntimeCallbacks = {
+    CUPTI_RUNTIME_TRACE_CBID_cudaMemcpy_v3020,
+    CUPTI_RUNTIME_TRACE_CBID_cudaMemcpy_ptds_v7000,
+    CUPTI_RUNTIME_TRACE_CBID_cudaMemcpyAsync_v3020,
+    CUPTI_RUNTIME_TRACE_CBID_cudaMemcpyAsync_ptsz_v7000};
+
+static bool isMemcpyRuntimeCbid(CUpti_CallbackId cbid) {
+  for (auto id : kMemcpyRuntimeCallbacks) {
+    if (id == cbid)
+      return true;
+  }
+  return false;
+}
+
+static bool isSynchronizeCbid(CUpti_CallbackId cbid) {
+  for (auto id : kSynchronizeCallbacks) {
+    if (id == cbid)
+      return true;
+  }
+  return false;
+}
+
+// Vendor-neutral synchronize kind. The api_synchronize USDT probe carries a
+// uint32 kind instead of a function-name string, so the eBPF side can read it
+// without a bpf_probe_read_user_str into user memory. The value space is
+// partitioned by backend so CUPTI (NVIDIA) and MSPTI (Ascend) never collide:
+//   100-199  CUPTI driver synchronize APIs
+//   200-299  MSPTI synchronize APIs (reserved for the Ascend adaptation)
+constexpr uint32_t kSyncKindCudaStreamSynchronize = 100;
+constexpr uint32_t kSyncKindCudaCtxSynchronize = 101;
+constexpr uint32_t kSyncKindCudaEventSynchronize = 102;
+constexpr uint32_t kSyncKindCudaStreamSynchronizePtsz = 103;
+
+static uint32_t synchronizeKind(CUpti_CallbackId cbid) {
+  switch (cbid) {
+  case CUPTI_DRIVER_TRACE_CBID_cuStreamSynchronize:
+    return kSyncKindCudaStreamSynchronize;
+  case CUPTI_DRIVER_TRACE_CBID_cuCtxSynchronize:
+    return kSyncKindCudaCtxSynchronize;
+  case CUPTI_DRIVER_TRACE_CBID_cuEventSynchronize:
+    return kSyncKindCudaEventSynchronize;
+  case CUPTI_DRIVER_TRACE_CBID_cuStreamSynchronize_ptsz:
+    return kSyncKindCudaStreamSynchronizePtsz;
+  default:
+    return 0; // Unreachable - guarded by isSynchronizeCbid()
+  }
+}
 
 namespace parcagpu {
+
+// Static lookup table mapping cudaError codes to their symbolic names.
+// Avoids dlsym(cudaGetErrorName) which fails when libcudart is loaded with
+// RTLD_LOCAL.
+static const char *cudaErrorName(int code) {
+  switch (code) {
+  case 1:
+    return "cudaErrorInvalidValue";
+  case 2:
+    return "cudaErrorMemoryAllocation";
+  case 3:
+    return "cudaErrorInitializationError";
+  case 4:
+    return "cudaErrorCudartUnloading";
+  case 5:
+    return "cudaErrorProfilerDisabled";
+  case 6:
+    return "cudaErrorProfilerNotInitialized";
+  case 7:
+    return "cudaErrorProfilerAlreadyStarted";
+  case 8:
+    return "cudaErrorProfilerAlreadyStopped";
+  case 9:
+    return "cudaErrorInvalidConfiguration";
+  case 12:
+    return "cudaErrorInvalidPitchValue";
+  case 13:
+    return "cudaErrorInvalidSymbol";
+  case 16:
+    return "cudaErrorInvalidHostPointer";
+  case 17:
+    return "cudaErrorInvalidDevicePointer";
+  case 18:
+    return "cudaErrorInvalidTexture";
+  case 19:
+    return "cudaErrorInvalidTextureBinding";
+  case 20:
+    return "cudaErrorInvalidChannelDescriptor";
+  case 21:
+    return "cudaErrorInvalidMemcpyDirection";
+  case 22:
+    return "cudaErrorAddressOfConstant";
+  case 23:
+    return "cudaErrorTextureFetchFailed";
+  case 24:
+    return "cudaErrorTextureNotBound";
+  case 25:
+    return "cudaErrorSynchronizationError";
+  case 26:
+    return "cudaErrorInvalidFilterSetting";
+  case 27:
+    return "cudaErrorInvalidNormSetting";
+  case 28:
+    return "cudaErrorMixedDeviceExecution";
+  case 31:
+    return "cudaErrorNotYetImplemented";
+  case 32:
+    return "cudaErrorMemoryValueTooLarge";
+  case 34:
+    return "cudaErrorStubLibrary";
+  case 35:
+    return "cudaErrorInsufficientDriver";
+  case 36:
+    return "cudaErrorCallRequiresNewerDriver";
+  case 37:
+    return "cudaErrorInvalidSurface";
+  case 43:
+    return "cudaErrorDuplicateVariableName";
+  case 44:
+    return "cudaErrorDuplicateTextureName";
+  case 45:
+    return "cudaErrorDuplicateSurfaceName";
+  case 46:
+    return "cudaErrorDevicesUnavailable";
+  case 49:
+    return "cudaErrorIncompatibleDriverContext";
+  case 52:
+    return "cudaErrorMissingConfiguration";
+  case 53:
+    return "cudaErrorPriorLaunchFailure";
+  case 65:
+    return "cudaErrorLaunchMaxDepthExceeded";
+  case 66:
+    return "cudaErrorLaunchFileScopedTex";
+  case 67:
+    return "cudaErrorLaunchFileScopedSurf";
+  case 68:
+    return "cudaErrorSyncDepthExceeded";
+  case 69:
+    return "cudaErrorLaunchPendingCountExceeded";
+  case 98:
+    return "cudaErrorInvalidDeviceFunction";
+  case 100:
+    return "cudaErrorNoDevice";
+  case 101:
+    return "cudaErrorInvalidDevice";
+  case 102:
+    return "cudaErrorDeviceNotLicensed";
+  case 103:
+    return "cudaErrorSoftwareValidityNotEstablished";
+  case 127:
+    return "cudaErrorStartupFailure";
+  case 200:
+    return "cudaErrorInvalidKernelImage";
+  case 201:
+    return "cudaErrorDeviceUninitialized";
+  case 205:
+    return "cudaErrorMapBufferObjectFailed";
+  case 206:
+    return "cudaErrorUnmapBufferObjectFailed";
+  case 207:
+    return "cudaErrorArrayIsMapped";
+  case 208:
+    return "cudaErrorAlreadyMapped";
+  case 209:
+    return "cudaErrorNoKernelImageForDevice";
+  case 210:
+    return "cudaErrorAlreadyAcquired";
+  case 211:
+    return "cudaErrorNotMapped";
+  case 212:
+    return "cudaErrorNotMappedAsArray";
+  case 213:
+    return "cudaErrorNotMappedAsPointer";
+  case 214:
+    return "cudaErrorECCUncorrectable";
+  case 215:
+    return "cudaErrorUnsupportedLimit";
+  case 216:
+    return "cudaErrorDeviceAlreadyInUse";
+  case 217:
+    return "cudaErrorPeerAccessUnsupported";
+  case 218:
+    return "cudaErrorInvalidPtx";
+  case 219:
+    return "cudaErrorInvalidGraphicsContext";
+  case 220:
+    return "cudaErrorNvlinkUncorrectable";
+  case 221:
+    return "cudaErrorJitCompilerNotFound";
+  case 222:
+    return "cudaErrorUnsupportedPtxVersion";
+  case 223:
+    return "cudaErrorJitCompilationDisabled";
+  case 224:
+    return "cudaErrorUnsupportedExecAffinity";
+  case 225:
+    return "cudaErrorUnsupportedDevSideSync";
+  case 226:
+    return "cudaErrorContained";
+  case 300:
+    return "cudaErrorInvalidSource";
+  case 301:
+    return "cudaErrorFileNotFound";
+  case 302:
+    return "cudaErrorSharedObjectSymbolNotFound";
+  case 303:
+    return "cudaErrorSharedObjectInitFailed";
+  case 304:
+    return "cudaErrorOperatingSystem";
+  case 400:
+    return "cudaErrorInvalidResourceHandle";
+  case 401:
+    return "cudaErrorIllegalState";
+  case 402:
+    return "cudaErrorLossyQuery";
+  case 500:
+    return "cudaErrorSymbolNotFound";
+  case 600:
+    return "cudaErrorNotReady";
+  case 700:
+    return "cudaErrorIllegalAddress";
+  case 701:
+    return "cudaErrorLaunchOutOfResources";
+  case 702:
+    return "cudaErrorLaunchTimeout";
+  case 703:
+    return "cudaErrorLaunchIncompatibleTexturing";
+  case 704:
+    return "cudaErrorPeerAccessAlreadyEnabled";
+  case 705:
+    return "cudaErrorPeerAccessNotEnabled";
+  case 708:
+    return "cudaErrorSetOnActiveProcess";
+  case 709:
+    return "cudaErrorContextIsDestroyed";
+  case 710:
+    return "cudaErrorAssert";
+  case 711:
+    return "cudaErrorTooManyPeers";
+  case 712:
+    return "cudaErrorHostMemoryAlreadyRegistered";
+  case 713:
+    return "cudaErrorHostMemoryNotRegistered";
+  case 714:
+    return "cudaErrorHardwareStackError";
+  case 715:
+    return "cudaErrorIllegalInstruction";
+  case 716:
+    return "cudaErrorMisalignedAddress";
+  case 717:
+    return "cudaErrorInvalidAddressSpace";
+  case 718:
+    return "cudaErrorInvalidPc";
+  case 719:
+    return "cudaErrorLaunchFailure";
+  case 720:
+    return "cudaErrorCooperativeLaunchTooLarge";
+  case 721:
+    return "cudaErrorTensorMemoryLeak";
+  case 800:
+    return "cudaErrorNotPermitted";
+  case 801:
+    return "cudaErrorNotSupported";
+  case 802:
+    return "cudaErrorSystemNotReady";
+  case 803:
+    return "cudaErrorSystemDriverMismatch";
+  case 804:
+    return "cudaErrorCompatNotSupportedOnDevice";
+  case 805:
+    return "cudaErrorMpsConnectionFailed";
+  case 806:
+    return "cudaErrorMpsRpcFailure";
+  case 807:
+    return "cudaErrorMpsServerNotReady";
+  case 808:
+    return "cudaErrorMpsMaxClientsReached";
+  case 809:
+    return "cudaErrorMpsMaxConnectionsReached";
+  case 810:
+    return "cudaErrorMpsClientTerminated";
+  case 811:
+    return "cudaErrorCdpNotSupported";
+  case 812:
+    return "cudaErrorCdpVersionMismatch";
+  case 900:
+    return "cudaErrorStreamCaptureUnsupported";
+  case 901:
+    return "cudaErrorStreamCaptureInvalidated";
+  case 902:
+    return "cudaErrorStreamCaptureMerge";
+  case 903:
+    return "cudaErrorStreamCaptureUnmatched";
+  case 904:
+    return "cudaErrorStreamCaptureUnjoined";
+  case 905:
+    return "cudaErrorStreamCaptureIsolation";
+  case 906:
+    return "cudaErrorStreamCaptureImplicit";
+  case 907:
+    return "cudaErrorCapturedEvent";
+  case 908:
+    return "cudaErrorStreamCaptureWrongThread";
+  case 909:
+    return "cudaErrorTimeout";
+  case 910:
+    return "cudaErrorGraphExecUpdateFailure";
+  case 911:
+    return "cudaErrorExternalDevice";
+  case 912:
+    return "cudaErrorInvalidClusterSize";
+  case 913:
+    return "cudaErrorFunctionNotLoaded";
+  case 914:
+    return "cudaErrorInvalidResourceType";
+  case 915:
+    return "cudaErrorInvalidResourceConfiguration";
+  case 999:
+    return "cudaErrorUnknown";
+  default:
+    return nullptr;
+  }
+}
 
 // Debug logging control
 bool debug_enabled = false;
@@ -30,6 +365,7 @@ bool debug_enabled = false;
 // Global correlation tracking instances
 static CorrelationFilter g_correlationFilter;
 static GraphCorrelationMap g_graphCorrelationMap;
+static MemcpyCorrelationMap g_memcpyCorrelationMap;
 static std::atomic<uint32_t> g_bufferCycle{0};
 
 // Thread-local tracking: store correlation ID from runtime ENTER
@@ -37,71 +373,153 @@ static std::atomic<uint32_t> g_bufferCycle{0};
 // runtime calls)
 thread_local uint32_t runtimeEnterCorrelationId = 0;
 
-// Thread-local rate limiter for callback probes (default 100/sec,
-// configurable via PARCAGPU_RATE_LIMIT).
-thread_local TokenBucket callbackLimiter(100.0);
+// Probabilistic sampling threshold, per-mille in [0, 1000]: 1000 samples
+// every launch, 0 samples none. Published by a detached background thread
+// that polls a threshold file; read on the CUPTI callback hot path via a
+// relaxed load so the callback stays non-blocking.
+static std::atomic<uint32_t> g_sampleThreshold{1000};
 
+// Fixed path read by the background thread. The Go agent writes the same
+// path through /proc/<pid>/root/tmp/parcagpu.threshold (it runs with
+// hostPID), which resolves to this process's /tmp.
+constexpr const char *kThresholdPath = "/tmp/parcagpu.threshold";
+
+// Poll interval for the threshold reader thread.
+constexpr auto kThresholdPollInterval = std::chrono::seconds(5);
+
+// Thread-local xorshift32 RNG for the sampling dice-roll. std::rand() keeps
+// global state and std::random_device may block — both are off-limits inside
+// a CUPTI callback. xorshift32 touches only thread-local state and is
+// lock-free.
+thread_local uint32_t g_randState = 0;
+inline uint32_t fastRand() {
+  uint32_t x = g_randState;
+  if (x == 0) {
+    x = static_cast<uint32_t>(syscall(SYS_gettid)) * 2654435761u ^ 0x9e3779b9u;
+    if (x == 0)
+      x = 0x9e3779b9u;
+  }
+  x ^= x << 13;
+  x ^= x >> 17;
+  x ^= x << 5;
+  g_randState = x;
+  return x;
+}
+
+// Roll the sampling dice; returns true when this launch should be recorded.
+inline bool sampleRoll() {
+  uint32_t t = g_sampleThreshold.load(std::memory_order_relaxed);
+  if (t >= 1000)
+    return true;
+  if (t == 0)
+    return false;
+  return (fastRand() % 1000u) < t;
+}
+
+// Detached reader thread and its shutdown flag.
+static std::atomic<bool> g_thresholdThreadRunning{false};
+static std::thread g_thresholdThread;
+
+// Background reader: polls kThresholdPath every kThresholdPollInterval and
+// publishes the parsed value into g_sampleThreshold. Blocking I/O lives here
+// (never in a CUPTI callback); a missing or malformed file keeps the previous
+// value.
+static void thresholdPollThread() {
+  while (g_thresholdThreadRunning.load(std::memory_order_relaxed)) {
+    std::ifstream in(kThresholdPath);
+    if (in.good()) {
+      uint32_t v = 0;
+      if (in >> v) {
+        if (v > 1000)
+          v = 1000;
+        g_sampleThreshold.store(v, std::memory_order_relaxed);
+      }
+    }
+    // Sleep in small slices so shutdown (which flips the running flag) takes
+    // effect within ~100ms rather than waiting out a full interval.
+    for (int i = 0;
+         i < 50 && g_thresholdThreadRunning.load(std::memory_order_relaxed);
+         ++i) {
+      std::this_thread::sleep_for(
+          std::chrono::duration_cast<std::chrono::milliseconds>(
+              kThresholdPollInterval) /
+          50);
+    }
+  }
+}
+
+// Starts the detached threshold reader thread exactly once.
+static void startThresholdPollThread() {
+  bool expected = false;
+  if (!g_thresholdThreadRunning.compare_exchange_strong(expected, true))
+    return; // already running
+  g_thresholdThread = std::thread(thresholdPollThread);
+  g_thresholdThread.detach();
+}
+
+// //
 // ---------------------------------------------------------------------------
-// PC sampling probabilistic control.
-//
-// Sampling is gated by a per-thread interval + dice-roll mechanism: at most
-// once per kPCSamplingIntervalNs, roll against probability; if it hits, open
-// a sampling window that stays active until the next interval boundary.
-//
-// The user-facing knob is PARCAGPU_PC_SAMPLING_RATE (samples/sec); a
-// process-wide controller adjusts the dice-roll probability over time so the
-// observed sample rate converges on the target. Internally the controller
-// reads `samplesTotal` (incremented from pc_sampling.cpp on every batch) and
-// recalibrates probability every kPCControlPeriodNs based on the rate
-// observed since the last update.
+// // PC sampling probabilistic control.
+// //
+// // Sampling is gated by a per-thread interval + dice-roll mechanism: at most
+// // once per kPCSamplingIntervalNs, roll against probability; if it hits, open
+// // a sampling window that stays active until the next interval boundary.
+// //
+// // The user-facing knob is COLAGPU_PC_SAMPLING_RATE (samples/sec); a
+// // process-wide controller adjusts the dice-roll probability over time so the
+// // observed sample rate converges on the target. Internally the controller
+// // reads `samplesTotal` (incremented from pc_sampling.cpp on every batch) and
+// // recalibrates probability every kPCControlPeriodNs based on the rate
+// // observed since the last update.
+// //
 // ---------------------------------------------------------------------------
-
-// 30 ms — short enough to give ~33 dice rolls/sec (tighter rate variance,
-// faster response to workload phase changes), long enough that CUPTI
-// start/stop cost (~25 us measured) is amortized to <0.1% of wall time.
-static constexpr uint64_t kPCSamplingIntervalNs = 30'000'000ULL;
-// How often the controller recalibrates probability based on observed rate.
-static constexpr uint64_t kPCControlPeriodNs = 5'000'000'000ULL;
-// Don't react to <25% rate error (avoids oscillating on noise).
-static constexpr double kPCControlTolerance = 0.25;
-// Symmetric step clamp at sqrt(2). Larger steps (2x or 4x) amplify
-// single-window sampling noise into multi-update oscillations: one
-// 30ms window happening to land in an idle phase shows few samples,
-// the controller over-corrects, then the next busy phase shows many.
-// sqrt(2) keeps each adjustment small enough that the eventual
-// equilibrium sits within the tolerance band even under bursty signal.
-static constexpr double kPCControlStepShrink = 1.41421356;
-static constexpr double kPCControlStepGrow = 1.41421356;
-static constexpr double kPCProbMin = 0.001;
-static constexpr double kPCProbMax = 1.0;
-// Initial probability *at the default target rate*. Higher values waste
-// samples on kernel-dense workloads (FNS-class: 5K launches/sec); lower
-// values starve kernel-sparse workloads (a few launches/sec) of dice
-// rolls until the controller grows it. 0.02 is a tested compromise at
-// targetRate=100. Real initial probability scales with targetRate (see
-// init_debug) so callers asking for high rates start sampling
-// immediately instead of waiting many control periods to climb.
-static constexpr double kPCInitialProbabilityAtDefaultRate = 0.02;
-// Default target rate when PARCAGPU_PC_SAMPLING_RATE is unset.
-static constexpr double kPCDefaultTargetRate = 100.0;
-
-struct PCRateController {
-  double targetRate = kPCDefaultTargetRate;       // immutable after init
-  std::atomic<double> probability{kPCInitialProbabilityAtDefaultRate};
-  std::atomic<uint64_t> samplesTotal{0};
-  std::atomic<uint64_t> lastCheckNs{0};
-  std::atomic<uint64_t> lastCheckTotal{0};
-};
-static PCRateController g_pcController;
-
-// Per-thread sampling state.
-struct PCSamplingState {
-  bool active = false;        // Currently sampling
-  uint64_t windowStartNs = 0; // When the current window opened
-  uint64_t lastCheckNs = 0;   // Last time we rolled the dice
-  unsigned int rngSeed = 0;   // Thread-local RNG state
-};
-thread_local PCSamplingState g_pcSamplingState;
+//
+// // 30 ms — short enough to give ~33 dice rolls/sec (tighter rate variance,
+// // faster response to workload phase changes), long enough that CUPTI
+// // start/stop cost (~25 us measured) is amortized to <0.1% of wall time.
+// static constexpr uint64_t kPCSamplingIntervalNs = 30'000'000ULL;
+// // How often the controller recalibrates probability based on observed rate.
+// static constexpr uint64_t kPCControlPeriodNs = 5'000'000'000ULL;
+// // Don't react to <25% rate error (avoids oscillating on noise).
+// static constexpr double kPCControlTolerance = 0.25;
+// // Symmetric step clamp at sqrt(2). Larger steps (2x or 4x) amplify
+// // single-window sampling noise into multi-update oscillations: one
+// // 30ms window happening to land in an idle phase shows few samples,
+// // the controller over-corrects, then the next busy phase shows many.
+// // sqrt(2) keeps each adjustment small enough that the eventual
+// // equilibrium sits within the tolerance band even under bursty signal.
+// static constexpr double kPCControlStepShrink = 1.41421356;
+// static constexpr double kPCControlStepGrow = 1.41421356;
+// static constexpr double kPCProbMin = 0.001;
+// static constexpr double kPCProbMax = 1.0;
+// // Initial probability *at the default target rate*. Higher values waste
+// // samples on kernel-dense workloads (FNS-class: 5K launches/sec); lower
+// // values starve kernel-sparse workloads (a few launches/sec) of dice
+// // rolls until the controller grows it. 0.02 is a tested compromise at
+// // targetRate=100. Real initial probability scales with targetRate (see
+// // init_debug) so callers asking for high rates start sampling
+// // immediately instead of waiting many control periods to climb.
+// static constexpr double kPCInitialProbabilityAtDefaultRate = 0.02;
+// // Default target rate when COLAGPU_PC_SAMPLING_RATE is unset.
+// static constexpr double kPCDefaultTargetRate = 100.0;
+//
+// struct PCRateController {
+//   double targetRate = kPCDefaultTargetRate; // immutable after init
+//   std::atomic<double> probability{kPCInitialProbabilityAtDefaultRate};
+//   std::atomic<uint64_t> samplesTotal{0};
+//   std::atomic<uint64_t> lastCheckNs{0};
+//   std::atomic<uint64_t> lastCheckTotal{0};
+// };
+// static PCRateController g_pcController;
+//
+// // Per-thread sampling state.
+// struct PCSamplingState {
+//   bool active = false;        // Currently sampling
+//   uint64_t windowStartNs = 0; // When the current window opened
+//   uint64_t lastCheckNs = 0;   // Last time we rolled the dice
+//   unsigned int rngSeed = 0;   // Thread-local RNG state
+// };
+// thread_local PCSamplingState g_pcSamplingState;
 
 static uint64_t nowNs() {
   struct timespec ts;
@@ -109,100 +527,94 @@ static uint64_t nowNs() {
   return (uint64_t)ts.tv_sec * 1000000000ULL + ts.tv_nsec;
 }
 
-// Seed the per-thread RNG lazily.
-static void ensureRngSeeded(PCSamplingState &s) {
-  if (s.rngSeed == 0) {
-    uint64_t t = nowNs();
-    s.rngSeed = (unsigned int)(t ^ (uintptr_t)&s);
-    if (s.rngSeed == 0)
-      s.rngSeed = 1;
-  }
-}
-
-static double threadRandom(PCSamplingState &s) {
-  ensureRngSeeded(s);
-  return (double)rand_r(&s.rngSeed) / RAND_MAX;
-}
-
-// Called from pc_sampling.cpp:processPCSamplingData() once per CUPTI batch
-// with the sum of distinct (PC, stallReason) pairs that had non-zero samples
-// — the unit the agent emits as a gpu_pc record on the receive side, and the
-// right rate to steer the controller with.
+// // Seed the per-thread RNG lazily.
+// static void ensureRngSeeded(PCSamplingState &s) {
+//   if (s.rngSeed == 0) {
+//     uint64_t t = nowNs();
+//     s.rngSeed = (unsigned int)(t ^ (uintptr_t)&s);
+//     if (s.rngSeed == 0)
+//       s.rngSeed = 1;
+//   }
+// }
+//
+// static double threadRandom(PCSamplingState &s) {
+//   ensureRngSeeded(s);
+//   return (double)rand_r(&s.rngSeed) / RAND_MAX;
+// }
+//
+// // Called from pc_sampling.cpp:processPCSamplingData() once per CUPTI batch
+// // with the sum of distinct (PC, stallReason) pairs that had non-zero samples
+// // — the unit the agent emits as a gpu_pc record on the receive side, and the
+// // right rate to steer the controller with.
 void recordPCSamples(uint64_t n) {
-  g_pcController.samplesTotal.fetch_add(n, std::memory_order_relaxed);
+  // g_pcController.samplesTotal.fetch_add(n, std::memory_order_relaxed);
+  (void)n;
 }
-
-// Adjust controller.probability to converge on targetRate. Cheap to call —
-// returns immediately unless kPCControlPeriodNs has elapsed since the last
-// adjustment. Safe under concurrent calls (CAS on lastCheckNs).
-static void controllerMaybeUpdate() {
-  if (g_pcController.targetRate <= 0.0)
-    return;
-  uint64_t now = nowNs();
-  uint64_t last = g_pcController.lastCheckNs.load(std::memory_order_relaxed);
-  if (now - last < kPCControlPeriodNs)
-    return;
-  // Only one thread per period actually performs the update.
-  if (!g_pcController.lastCheckNs.compare_exchange_strong(
-          last, now, std::memory_order_acq_rel))
-    return;
-  uint64_t total =
-      g_pcController.samplesTotal.load(std::memory_order_relaxed);
-  uint64_t lastTotal = g_pcController.lastCheckTotal.exchange(
-      total, std::memory_order_acq_rel);
-  uint64_t delta = total - lastTotal;
-  uint64_t elapsed = now - last;
-  if (elapsed == 0)
-    return;
-  double observedRate = (double)delta * 1e9 / (double)elapsed;
-  double err =
-      (observedRate - g_pcController.targetRate) / g_pcController.targetRate;
-  if (std::abs(err) <= kPCControlTolerance)
-    return;
-  double ratio =
-      g_pcController.targetRate / std::max(observedRate, 1e-3);
-  ratio = std::clamp(ratio, 1.0 / kPCControlStepShrink, kPCControlStepGrow);
-  double oldP = g_pcController.probability.load(std::memory_order_relaxed);
-  double newP = std::clamp(oldP * ratio, kPCProbMin, kPCProbMax);
-  g_pcController.probability.store(newP, std::memory_order_relaxed);
-  DEBUG_PRINTF("[PARCAGPU] PC rate controller: observed=%.2f target=%.2f "
-               "old_p=%.5f new_p=%.5f\n",
-               observedRate, g_pcController.targetRate, oldP, newP);
-}
+//
+// // Adjust controller.probability to converge on targetRate. Cheap to call —
+// // returns immediately unless kPCControlPeriodNs has elapsed since the last
+// // adjustment. Safe under concurrent calls (CAS on lastCheckNs).
+// static void controllerMaybeUpdate() {
+//   if (g_pcController.targetRate <= 0.0)
+//     return;
+//   uint64_t now = nowNs();
+//   uint64_t last = g_pcController.lastCheckNs.load(std::memory_order_relaxed);
+//   if (now - last < kPCControlPeriodNs)
+//     return;
+//   // Only one thread per period actually performs the update.
+//   if (!g_pcController.lastCheckNs.compare_exchange_strong(
+//           last, now, std::memory_order_acq_rel))
+//     return;
+//   uint64_t total =
+//   g_pcController.samplesTotal.load(std::memory_order_relaxed); uint64_t
+//   lastTotal =
+//       g_pcController.lastCheckTotal.exchange(total,
+//       std::memory_order_acq_rel);
+//   uint64_t delta = total - lastTotal;
+//   uint64_t elapsed = now - last;
+//   if (elapsed == 0)
+//     return;
+//   double observedRate = (double)delta * 1e9 / (double)elapsed;
+//   double err =
+//       (observedRate - g_pcController.targetRate) / g_pcController.targetRate;
+//   if (std::abs(err) <= kPCControlTolerance)
+//     return;
+//   double ratio = g_pcController.targetRate / std::max(observedRate, 1e-3);
+//   ratio = std::clamp(ratio, 1.0 / kPCControlStepShrink, kPCControlStepGrow);
+//   double oldP = g_pcController.probability.load(std::memory_order_relaxed);
+//   double newP = std::clamp(oldP * ratio, kPCProbMin, kPCProbMax);
+//   g_pcController.probability.store(newP, std::memory_order_relaxed);
+//   DEBUG_PRINTF("[COLAGPU] PC rate controller: observed=%.2f target=%.2f "
+//                "old_p=%.5f new_p=%.5f\n",
+//                observedRate, g_pcController.targetRate, oldP, newP);
+// }
 
 void init_debug() {
   static bool initialized = false;
   if (!initialized) {
     initialized = true;
-    debug_enabled = getenv("PARCAGPU_DEBUG") != nullptr;
-    const char *rateEnv = getenv("PARCAGPU_RATE_LIMIT");
-    if (rateEnv != nullptr) {
-      double rate = atof(rateEnv);
-      if (rate > 0) {
-        callbackLimiter.setRate(rate);
-      }
-    }
+    debug_enabled = getenv("COLAGPU_DEBUG") != nullptr;
 
-    const char *targetRateEnv = getenv("PARCAGPU_PC_SAMPLING_RATE");
-    if (targetRateEnv) {
-      double r = atof(targetRateEnv);
-      if (r > 0.0)
-        g_pcController.targetRate = r;
-    }
-    // Scale initial probability with target rate so high-target requests
-    // start sampling immediately. The controller fires only when a
-    // sampling window closes; if the workload launches kernels rarely
-    // (vortex-class: ~1 launch/sec) and the initial probability is too
-    // low for a window to open, the controller starves and can never
-    // climb. Scaling avoids that for the common "user wants lots of
-    // samples on a sparse workload" case.
-    {
-      double scaled = kPCInitialProbabilityAtDefaultRate *
-                      (g_pcController.targetRate / kPCDefaultTargetRate);
-      double initP = std::clamp(scaled, kPCProbMin, kPCProbMax);
-      g_pcController.probability.store(initP, std::memory_order_relaxed);
-    }
-    g_pcController.lastCheckNs.store(nowNs(), std::memory_order_relaxed);
+    // const char *targetRateEnv = getenv("COLAGPU_PC_SAMPLING_RATE");
+    // if (targetRateEnv) {
+    //   double r = atof(targetRateEnv);
+    //   if (r > 0.0)
+    //     g_pcController.targetRate = r;
+    // }
+    // // Scale initial probability with target rate so high-target requests
+    // // start sampling immediately. The controller fires only when a
+    // // sampling window closes; if the workload launches kernels rarely
+    // // (vortex-class: ~1 launch/sec) and the initial probability is too
+    // // low for a window to open, the controller starves and can never
+    // // climb. Scaling avoids that for the common "user wants lots of
+    // // samples on a sparse workload" case.
+    // {
+    //   double scaled = kPCInitialProbabilityAtDefaultRate *
+    //                   (g_pcController.targetRate / kPCDefaultTargetRate);
+    //   double initP = std::clamp(scaled, kPCProbMin, kPCProbMax);
+    //   g_pcController.probability.store(initP, std::memory_order_relaxed);
+    // }
+    // g_pcController.lastCheckNs.store(nowNs(), std::memory_order_relaxed);
 
     validateEnvVars();
     initialized = true;
@@ -211,23 +623,14 @@ void init_debug() {
 
 // Out-of-line USDT probe site for activity batches.
 // Single call site ensures one probe location in the ELF .note.stapsdt section.
-static constexpr int ACTIVITY_BATCH_SIZE = 128;
-
 } // namespace parcagpu
-
-__attribute__((noinline)) void parcagpuActivityBatch(const void **ptrs,
-                                                     uint32_t count) {
-  PARCAGPU_ACTIVITY_BATCH(ptrs, count);
-}
 
 namespace parcagpu {
 
 // Simplified profiler using Proton's patterns
 class CuptiProfiler : public proton::Singleton<CuptiProfiler> {
 public:
-  CuptiProfiler() {
-    DEBUG_PRINTF("[PARCAGPU] Initializing ParcaGPUProfiler\n");
-  }
+  CuptiProfiler() { DEBUG_PRINTF("[COLAGPU] Initializing ParcaGPUProfiler\n"); }
 
   ~CuptiProfiler() { cleanup(); }
 
@@ -236,22 +639,22 @@ public:
       return true; // Already initialized
     }
 
-    DEBUG_PRINTF("[PARCAGPU] Starting initialization\n");
+    DEBUG_PRINTF("[COLAGPU] Starting initialization\n");
 
-    // Check if PC sampling is supported
-    pcSamplingEnabled = parcagpu::PCSampling::isSupported();
-    if (pcSamplingEnabled) {
-      DEBUG_PRINTF("[PARCAGPU] PC sampling enabled (serialized mode)\n");
-    } else {
-      DEBUG_PRINTF(
-          "[PARCAGPU] PC sampling disabled, using kernel activity only\n");
-    }
+    // // Check if PC sampling is supported
+    // pcSamplingEnabled = parcagpu::PCSampling::isSupported();
+    // if (pcSamplingEnabled) {
+    //   DEBUG_PRINTF("[COLAGPU] PC sampling enabled (serialized mode)\n");
+    // } else {
+    //   DEBUG_PRINTF(
+    //       "[COLAGPU] PC sampling disabled, using kernel activity only\n");
+    // }
 
     // Subscribe to callbacks
     auto result =
         proton::cupti::subscribe<true>(&subscriber, callbackHandler, nullptr);
     if (result != CUPTI_SUCCESS) {
-      DEBUG_PRINTF("[PARCAGPU] Failed to subscribe to callbacks: error %d\n",
+      DEBUG_PRINTF("[COLAGPU] Failed to subscribe to callbacks: error %d\n",
                    result);
       return false;
     }
@@ -260,9 +663,37 @@ public:
     proton::setRuntimeCallbacks(subscriber, /*enable=*/true);
     proton::setLaunchCallbacks(subscriber, /*enable=*/true);
 
-    // Enable resource callbacks only if PC sampling is enabled
-    if (pcSamplingEnabled) {
-      proton::setResourceCallbacks(subscriber, /*enable=*/true);
+    // // Enable resource callbacks only if PC sampling is enabled
+    // if (pcSamplingEnabled) {
+    //   proton::setResourceCallbacks(subscriber, /*enable=*/true);
+    // }
+
+    // Enable synchronize driver API callbacks for sync tracking
+    for (auto cbId : kSynchronizeCallbacks) {
+      result = proton::cupti::enableCallback<true>(
+          /*enable=*/1, subscriber, CUPTI_CB_DOMAIN_DRIVER_API, cbId);
+      if (result != CUPTI_SUCCESS) {
+        DEBUG_PRINTF("[COLAGPU] Failed to enableCallback %d: error %d\n", cbId,
+                     result);
+        return false;
+      } else {
+        DEBUG_PRINTF("[COLAGPU] enable driver callback %d\n", cbId);
+      }
+    }
+
+    // Enable runtime memcpy callbacks so pid/tid can be captured for
+    // memcpy activity record correlation.
+    for (auto cbId : kMemcpyRuntimeCallbacks) {
+      result = proton::cupti::enableCallback<true>(
+          /*enable=*/1, subscriber, CUPTI_CB_DOMAIN_RUNTIME_API, cbId);
+      if (result != CUPTI_SUCCESS) {
+        DEBUG_PRINTF(
+            "[COLAGPU] Failed to enable memcpy callback %d: error %d\n", cbId,
+            result);
+        return false;
+      } else {
+        DEBUG_PRINTF("[COLAGPU] enable runtime memcpy callback %d\n", cbId);
+      }
     }
 
     // Register activity buffer callbacks (using Proton's pattern)
@@ -270,23 +701,33 @@ public:
                                                             completeBuffer);
     if (result != CUPTI_SUCCESS) {
       DEBUG_PRINTF(
-          "[PARCAGPU] Failed to register activity callbacks: error %d\n",
+          "[COLAGPU] Failed to register activity callbacks: error %d\n",
           result);
       return false;
     }
 
-    // Enable kernel activity recording
-    result = proton::cupti::activityEnable<true>(
-        CUPTI_ACTIVITY_KIND_CONCURRENT_KERNEL);
-    if (result != CUPTI_SUCCESS) {
-      DEBUG_PRINTF(
-          "[PARCAGPU] Failed to enable concurrent kernel activity: error %d\n",
-          result);
-    } else {
-      DEBUG_PRINTF("[PARCAGPU] Enabled CONCURRENT_KERNEL activity\n");
+    // Enable activity kinds via loop — uses <false> (non-throwing) so one
+    // failure doesn't abort the rest.
+    std::map<CUpti_ActivityKind, std::string> activities = {
+        {CUPTI_ACTIVITY_KIND_CONCURRENT_KERNEL, "CONCURRENT_KERNEL"},
+        {CUPTI_ACTIVITY_KIND_DRIVER, "DRIVER"},
+        {CUPTI_ACTIVITY_KIND_RUNTIME, "RUNTIME"},
+        {CUPTI_ACTIVITY_KIND_MEMCPY, "MEMCPY"},
+        {CUPTI_ACTIVITY_KIND_MEMCPY2, "MEMCPY2(P2P)"},
+    };
+    for (const auto &[kind, name] : activities) {
+      if (auto r = proton::cupti::activityEnable<false>(kind);
+          r != CUPTI_SUCCESS) {
+        DEBUG_PRINTF("[COLAGPU] Failed to enable %s activity: error %d\n",
+                     name.c_str(), r);
+      } else {
+        DEBUG_PRINTF("[COLAGPU] Enabled %s activity\n", name.c_str());
+      }
     }
 
-    DEBUG_PRINTF("[PARCAGPU] Successfully initialized CUPTI callbacks\n");
+    startThresholdPollThread();
+
+    DEBUG_PRINTF("[COLAGPU] Successfully initialized CUPTI callbacks\n");
     return true;
   }
 
@@ -295,7 +736,7 @@ public:
       return; // Already cleaned up
     }
 
-    DEBUG_PRINTF("[PARCAGPU] Cleanup started\n");
+    DEBUG_PRINTF("[COLAGPU] Cleanup started\n");
 
     // PC sampling data is drained in finalize() during CONTEXT_DESTROY_STARTING
     // when the CUDA context is still valid. By the time cleanup() runs, the
@@ -305,9 +746,18 @@ public:
     if (subscriber) {
       proton::setRuntimeCallbacks(subscriber, /*enable=*/false);
       proton::setLaunchCallbacks(subscriber, /*enable=*/false);
-      if (pcSamplingEnabled) {
-        proton::setResourceCallbacks(subscriber, /*enable=*/false);
+
+      for (auto cbId : kSynchronizeCallbacks) {
+        proton::cupti::enableCallback<false>(/*enable=*/0, subscriber,
+                                             CUPTI_CB_DOMAIN_DRIVER_API, cbId);
       }
+      for (auto cbId : kMemcpyRuntimeCallbacks) {
+        proton::cupti::enableCallback<false>(/*enable=*/0, subscriber,
+                                             CUPTI_CB_DOMAIN_RUNTIME_API, cbId);
+      }
+      // if (pcSamplingEnabled) {
+      //   proton::setResourceCallbacks(subscriber, /*enable=*/false);
+      // }
     }
 
     // Cleanup runs from atexit and may also reach us via a libcupti callback
@@ -316,33 +766,41 @@ public:
     if (auto r = proton::cupti::activityFlushAll<false>(
             CUPTI_ACTIVITY_FLAG_FLUSH_FORCED);
         r != CUPTI_SUCCESS) {
-      DEBUG_PRINTF("[PARCAGPU] activityFlushAll failed: %d\n", r);
+      DEBUG_PRINTF("[COLAGPU] activityFlushAll failed: %d\n", r);
     }
 
-    if (auto r = proton::cupti::activityDisable<false>(
-            CUPTI_ACTIVITY_KIND_CONCURRENT_KERNEL);
-        r != CUPTI_SUCCESS) {
-      DEBUG_PRINTF("[PARCAGPU] activityDisable failed: %d\n", r);
+    // Disable all activity kinds (mirrors the enable loop above)
+    for (CUpti_ActivityKind kind :
+         {CUPTI_ACTIVITY_KIND_CONCURRENT_KERNEL, CUPTI_ACTIVITY_KIND_DRIVER,
+          CUPTI_ACTIVITY_KIND_RUNTIME, CUPTI_ACTIVITY_KIND_MEMCPY,
+          CUPTI_ACTIVITY_KIND_MEMCPY2}) {
+      if (auto r = proton::cupti::activityDisable<false>(kind);
+          r != CUPTI_SUCCESS) {
+        DEBUG_PRINTF("[COLAGPU] activityDisable(%d) failed: %d\n", kind, r);
+      }
     }
 
     if (subscriber) {
       if (auto r = proton::cupti::unsubscribe<false>(subscriber);
           r != CUPTI_SUCCESS) {
-        DEBUG_PRINTF("[PARCAGPU] unsubscribe failed: %d\n", r);
+        DEBUG_PRINTF("[COLAGPU] unsubscribe failed: %d\n", r);
       }
       subscriber = nullptr;
     }
 
-    DEBUG_PRINTF("[PARCAGPU] Cleanup completed\n");
+    // Stop the threshold reader thread (detached; it exits within ~100ms).
+    g_thresholdThreadRunning.store(false, std::memory_order_relaxed);
+
+    DEBUG_PRINTF("[COLAGPU] Cleanup completed\n");
   }
 
 private:
   std::atomic<bool> initialized{false};
-  bool pcSamplingEnabled = false;
+  // bool pcSamplingEnabled = false;
   CUpti_SubscriberHandle subscriber = nullptr;
 
-  // PC sampling state — owned by this profiler, destroyed with it.
-  parcagpu::PCSampling pcSampling;
+  // // PC sampling state — owned by this profiler, destroyed with it.
+  // parcagpu::PCSampling pcSampling;
 
   // Outstanding event counter for flushing
   size_t outstandingEvents = 0;
@@ -359,13 +817,13 @@ private:
 
   static void allocBuffer(uint8_t **buffer, size_t *bufferSize,
                           size_t *maxNumRecords) {
-    if (!PARCAGPU_CUDA_CORRELATION_ENABLED()) {
+    if (!COLAGPU_API_CORRELATION_ENABLED()) {
       *buffer = nullptr;
       return;
     }
     *buffer = static_cast<uint8_t *>(aligned_alloc(AlignSize, BufferSize));
     if (*buffer == nullptr) {
-      DEBUG_PRINTF("[PARCAGPU] ERROR: aligned_alloc failed\n");
+      DEBUG_PRINTF("[COLAGPU] ERROR: aligned_alloc failed\n");
       return;
     }
     *bufferSize = BufferSize;
@@ -380,14 +838,13 @@ private:
     int recordCount = 0;
     int filteredCount = 0;
 
-    // Batch probe: collect pointers to activity records and pass them to
-    // BPF/USDT every ACTIVITY_BATCH_SIZE records. Stack-allocated array
-    // of pointers — no heap allocation, no copying, version-independent.
-    const void *batchPtrs[ACTIVITY_BATCH_SIZE];
-    uint32_t batchCount = 0;
+    ActivityEvent hostEvents[ACTIVITY_BATCH_SIZE];
+    uint32_t hostCount = 0;
+    ActivityEvent kernelEvents[ACTIVITY_BATCH_SIZE];
+    uint32_t kernelCount = 0;
 
     DEBUG_PRINTF(
-        "[PARCAGPU] completeBuffer called: ctx=%p buffer=%p validSize=%zu\n",
+        "[COLAGPU] completeBuffer called: ctx=%p buffer=%p validSize=%zu\n",
         ctx, buffer, validSize);
 
     // Start a new buffer cycle for graph correlation tracking
@@ -400,12 +857,15 @@ private:
       if (result == CUPTI_ERROR_MAX_LIMIT_REACHED) {
         break;
       } else if (result != CUPTI_SUCCESS) {
-        DEBUG_PRINTF("[PARCAGPU] Error reading activity record: error %d\n",
+        DEBUG_PRINTF("[COLAGPU] Error reading activity record: error %d\n",
                      result);
         break;
       }
 
       recordCount++;
+
+      ActivityEvent evt;
+      memset(&evt, 0, sizeof(evt));
       switch (record->kind) {
       case CUPTI_ACTIVITY_KIND_CONCURRENT_KERNEL:
       case CUPTI_ACTIVITY_KIND_KERNEL: {
@@ -413,68 +873,222 @@ private:
 
         // Check correlation filter - only emit probe if this kernel was sampled
         bool shouldEmit = false;
+        uint32_t kernelTid = 0;
         if (k->graphId != 0) {
           // Graph kernel - check graph correlation map
           shouldEmit = g_graphCorrelationMap.check_and_mark_seen(
-              k->correlationId, cycle);
+              k->correlationId, cycle, &kernelTid);
         } else {
           // Regular kernel - check and remove from correlation filter
-          shouldEmit = g_correlationFilter.check_and_remove(k->correlationId);
+          shouldEmit = g_correlationFilter.check_and_remove(k->correlationId,
+                                                            &kernelTid);
         }
 
         if (!shouldEmit) {
           filteredCount++;
-          DEBUG_PRINTF("[PARCAGPU] Filtered kernel activity: correlationId=%u "
+          DEBUG_PRINTF("[COLAGPU] Filtered kernel activity: correlationId=%u "
                        "graphId=%u (not in filter)\n",
                        k->correlationId, k->graphId);
-          // Skip both KERNEL_EXECUTED and activity_batch push. Without this,
-          // the eBPF activity_batch consumer would emit a kernel_event for
-          // every rate-limited launch, producing orphan entries in parca-agent's
-          // timesAwaitingTraces map (no cuda_correlation USDT was emitted for
-          // these correlation IDs, so no trace will ever arrive to match them).
           break;
         }
 
-        DEBUG_PRINTF("[PARCAGPU] Kernel activity: graphId=%u graphNodeId=%lu "
+        DEBUG_PRINTF("[COLAGPU] Kernel activity: graphId=%u graphNodeId=%lu "
                      "name=%s, correlationId=%u, deviceId=%u, "
                      "streamId=%u, start=%lu, end=%lu, duration=%lu ns\n",
                      k->graphId, k->graphNodeId, k->name, k->correlationId,
                      k->deviceId, k->streamId, k->start, k->end,
                      k->end - k->start);
 
-        // Emit USDT probe for kernel execution
-        PARCAGPU_KERNEL_EXECUTED(k->start, k->end, k->correlationId,
-                                 k->deviceId, k->streamId, k->graphId,
-                                 k->graphNodeId, k->name);
-
-        // Collect pointer for batch probe — only for kernel records that
-        // passed the correlation filter. eBPF's activity_batch handler only
-        // emits kernel_events for KERNEL/CONCURRENT_KERNEL kinds anyway
-        // (cuda.ebpf.c kind check), so excluding non-kernel kinds here saves
-        // ringbuf bandwidth without losing any consumed data.
-        batchPtrs[batchCount++] = record;
-        if (batchCount >= ACTIVITY_BATCH_SIZE) {
-          parcagpuActivityBatch(batchPtrs, batchCount);
-          batchCount = 0;
+        evt.kind = ACTIVITY_KIND_KERNEL;
+        evt.start = k->start;
+        evt.end = k->end;
+        evt.correlationId = k->correlationId;
+        evt.deviceId = k->deviceId;
+        evt.streamId = k->streamId;
+        evt.graphId = k->graphId;
+        evt.graphNodeId = k->graphNodeId;
+        evt.name = k->name;
+        evt.tid = kernelTid;
+        if (evt.start == 0 || evt.end == 0)
+          break;
+        kernelEvents[kernelCount++] = evt;
+        if (kernelCount >= ACTIVITY_BATCH_SIZE) {
+          parcagpuKernelTiming(kernelEvents, kernelCount);
+          kernelCount = 0;
         }
         break;
       }
-      default:
-        DEBUG_PRINTF("[PARCAGPU] Activity record %d: kind=%d\n", recordCount,
-                     record->kind);
+      case CUPTI_ACTIVITY_KIND_RUNTIME:
+      case CUPTI_ACTIVITY_KIND_DRIVER: {
+        CUpti_ActivityAPI *api = reinterpret_cast<CUpti_ActivityAPI *>(record);
+        bool is_launch;
+        if (record->kind == CUPTI_ACTIVITY_KIND_RUNTIME) {
+          switch (api->cbid) {
+          case CUPTI_RUNTIME_TRACE_CBID_cudaLaunchKernel_v7000:
+          case CUPTI_RUNTIME_TRACE_CBID_cudaLaunchKernelExC_ptsz_v11060:
+          case CUPTI_RUNTIME_TRACE_CBID_cudaLaunchKernelExC_v11060:
+          case CUPTI_RUNTIME_TRACE_CBID_cudaLaunchKernel_ptsz_v7000:
+          case CUPTI_RUNTIME_TRACE_CBID_cudaGraphLaunch_v10000:
+          case CUPTI_RUNTIME_TRACE_CBID_cudaGraphLaunch_ptsz_v10000:
+            is_launch = true;
+            break;
+          default:
+            is_launch = false;
+            break;
+          }
+        } else {
+          is_launch = proton::isLaunch(api->cbid);
+        }
+        if (!is_launch) {
+          break;
+        }
+        evt.kind = ACTIVITY_KIND_HOST_API;
+        evt.start = api->start;
+        evt.end = api->end;
+        evt.correlationId = api->correlationId;
+        if (evt.start == 0 || evt.end == 0)
+          break;
+        hostEvents[hostCount++] = evt;
+        if (hostCount >= ACTIVITY_BATCH_SIZE) {
+          parcagpuHostTiming(hostEvents, hostCount);
+          hostCount = 0;
+        }
         break;
+      }
+      case CUPTI_ACTIVITY_KIND_MEMCPY: {
+        // Standard memory copy (H2D, D2H, D2D, H2A, A2H, etc.)
+        auto *m = reinterpret_cast<CUpti_ActivityMemcpy6 *>(record);
+
+        // Look up pid/tid via correlation ID. For runtime-launched memcpy
+        // (cudaMemcpy*), the runtimeCorrelationId matches what we stored in
+        // the callback handler. For driver-only memcpy (cuMemcpy*), the
+        // correlationId matches.
+        uint32_t lookupId = m->runtimeCorrelationId != 0
+                                ? m->runtimeCorrelationId
+                                : m->correlationId;
+        MemcpyCorrelationMap::Info info{};
+        bool found = g_memcpyCorrelationMap.check_and_remove(lookupId, &info);
+
+        DEBUG_PRINTF(
+            "[COLAGPU] Memcpy activity: copyKind=%u bytes=%lu "
+            "deviceId=%u streamId=%u start=%lu end=%lu duration=%lu ns "
+            "flags=%u correlationId=%u runtimeCorrId=%u pid=%u tid=%u\n",
+            m->copyKind, m->bytes, m->deviceId, m->streamId, m->start, m->end,
+            m->end - m->start, m->flags, m->correlationId,
+            m->runtimeCorrelationId, found ? info.pid : 0,
+            found ? info.tid : 0);
+
+        // Map NVIDIA CUPTI copyKind to vendor-neutral values:
+        // HTOD=1→100(H2D), DTOH=2→101(D2H), DTOD=8→101(D2D),
+        // PTOP=10→103(P2P).  All other copyKind values are discarded.
+        uint16_t mappedCopyKind = 0;
+        switch (m->copyKind) {
+        case CUPTI_ACTIVITY_MEMCPY_KIND_HTOD:
+          mappedCopyKind = 100;
+          break;
+        case CUPTI_ACTIVITY_MEMCPY_KIND_DTOH:
+          mappedCopyKind = 101;
+          break;
+        case CUPTI_ACTIVITY_MEMCPY_KIND_DTOD:
+          mappedCopyKind = 101;
+          break;
+        case CUPTI_ACTIVITY_MEMCPY_KIND_PTOP:
+          mappedCopyKind = 103;
+          break;
+        default:
+          break;
+        }
+        if (mappedCopyKind == 0) {
+          DEBUG_PRINTF(
+              "[COLAGPU] Memcpy activity dropped: unsupported copyKind=%u\n",
+              m->copyKind);
+          break;
+        }
+
+        evt.kind = ACTIVITY_KIND_MEMCPY;
+        evt.start = m->start;
+        evt.end = m->end;
+        evt.correlationId = m->correlationId;
+        evt.deviceId = m->deviceId;
+        evt.streamId = m->streamId;
+        evt.bytes = m->bytes;
+        evt.copyKind = mappedCopyKind;
+        evt.sync = (m->flags & CUPTI_ACTIVITY_FLAG_MEMCPY_ASYNC) ? 0 : 1;
+        evt.tid = found ? info.tid : 0;
+        if (evt.start == 0 || evt.end == 0)
+          break;
+        kernelEvents[kernelCount++] = evt;
+        if (kernelCount >= ACTIVITY_BATCH_SIZE) {
+          parcagpuKernelTiming(kernelEvents, kernelCount);
+          kernelCount = 0;
+        }
+        break;
+      }
+      case CUPTI_ACTIVITY_KIND_MEMCPY2: {
+        // Peer-to-peer memory copy
+        auto *m = reinterpret_cast<CUpti_ActivityMemcpyPtoP4 *>(record);
+
+        MemcpyCorrelationMap::Info info{};
+        bool found =
+            g_memcpyCorrelationMap.check_and_remove(m->correlationId, &info);
+
+        DEBUG_PRINTF("[COLAGPU] Memcpy P2P activity: copyKind=%u bytes=%lu "
+                     "deviceId=%u srcDeviceId=%u dstDeviceId=%u streamId=%u "
+                     "start=%lu end=%lu duration=%lu ns flags=%u "
+                     "correlationId=%u pid=%u tid=%u\n",
+                     m->copyKind, m->bytes, m->deviceId, m->srcDeviceId,
+                     m->dstDeviceId, m->streamId, m->start, m->end,
+                     m->end - m->start, m->flags, m->correlationId,
+                     found ? info.pid : 0, found ? info.tid : 0);
+
+        // MEMCPY2 is inherently P2P — always map to 103.
+        // Still validate copyKind: only PTOP is expected here.
+        if (m->copyKind != CUPTI_ACTIVITY_MEMCPY_KIND_PTOP) {
+          DEBUG_PRINTF("[COLAGPU] Memcpy P2P activity dropped: unexpected "
+                       "copyKind=%u\n",
+                       m->copyKind);
+          break;
+        }
+
+        evt.kind = ACTIVITY_KIND_MEMCPY;
+        evt.start = m->start;
+        evt.end = m->end;
+        evt.correlationId = m->correlationId;
+        evt.deviceId = m->deviceId;
+        evt.streamId = m->streamId;
+        evt.bytes = m->bytes;
+        evt.copyKind = 103;
+        evt.sync = (m->flags & CUPTI_ACTIVITY_FLAG_MEMCPY_ASYNC) ? 0 : 1;
+        evt.tid = found ? info.tid : 0;
+        if (evt.start == 0 || evt.end == 0)
+          break;
+        kernelEvents[kernelCount++] = evt;
+        if (kernelCount >= ACTIVITY_BATCH_SIZE) {
+          parcagpuKernelTiming(kernelEvents, kernelCount);
+          kernelCount = 0;
+        }
+        break;
+      }
+      default: {
+        DEBUG_PRINTF("[COLAGPU] Activity record %d: kind=%d (unknown)\n",
+                     recordCount, record->kind);
+        break;
+      }
       }
     }
 
-    // Flush remaining batch
-    if (batchCount > 0) {
-      parcagpuActivityBatch(batchPtrs, batchCount);
+    // Flush remaining batches
+    if (hostCount > 0) {
+      parcagpuHostTiming(hostEvents, hostCount);
+    }
+    if (kernelCount > 0) {
+      parcagpuKernelTiming(kernelEvents, kernelCount);
     }
 
     // End cycle - cleanup completed graph entries
     g_graphCorrelationMap.cycle_end();
 
-    DEBUG_PRINTF("[PARCAGPU] Processed %d activity records (%d filtered) from "
+    DEBUG_PRINTF("[COLAGPU] Processed %d activity records (%d filtered) from "
                  "buffer %p\n",
                  recordCount, filteredCount, buffer);
 
@@ -492,217 +1106,295 @@ private:
     // C++ EH support, so any uncaught throw aborts the process. Treat the
     // whole body as untrusted and swallow exceptions at the boundary.
     try {
-    auto &profiler = CuptiProfiler::instance();
-
-    if (domain == CUPTI_CB_DOMAIN_RESOURCE) {
-      // Handle resource callbacks for PC sampling (only if enabled)
-      if (!profiler.pcSamplingEnabled) {
-        return;
-      }
-
-      const CUpti_ResourceData *resData =
-          static_cast<const CUpti_ResourceData *>(cbdata_void);
-
-      switch (cbid) {
-      case CUPTI_CBID_RESOURCE_MODULE_LOADED: {
-        const CUpti_ModuleResourceData *modData =
-            static_cast<const CUpti_ModuleResourceData *>(
-                resData->resourceDescriptor);
-        if (modData && modData->pCubin && modData->cubinSize > 0) {
-          DEBUG_PRINTF("[PARCAGPU] Module loaded: cubin=%p size=%zu\n",
-                       modData->pCubin, modData->cubinSize);
-          profiler.pcSampling.loadModule(modData->pCubin, modData->cubinSize);
+      auto &profiler = CuptiProfiler::instance();
+      switch (domain) {
+      // case CUPTI_CB_DOMAIN_RESOURCE: {
+      //   // Handle resource callbacks for PC sampling (only if enabled)
+      //   if (!profiler.pcSamplingEnabled) {
+      //     return;
+      //   }
+      //
+      //   const CUpti_ResourceData *resData =
+      //       static_cast<const CUpti_ResourceData *>(cbdata_void);
+      //
+      //   switch (cbid) {
+      //   case CUPTI_CBID_RESOURCE_MODULE_LOADED: {
+      //     const CUpti_ModuleResourceData *modData =
+      //         static_cast<const CUpti_ModuleResourceData *>(
+      //             resData->resourceDescriptor);
+      //     if (modData && modData->pCubin && modData->cubinSize > 0) {
+      //       DEBUG_PRINTF("[COLAGPU] Module loaded: cubin=%p size=%zu\n",
+      //                    modData->pCubin, modData->cubinSize);
+      //       profiler.pcSampling.loadModule(modData->pCubin,
+      //       modData->cubinSize);
+      //     }
+      //     break;
+      //   }
+      //   case CUPTI_CBID_RESOURCE_MODULE_UNLOAD_STARTING: {
+      //     const CUpti_ModuleResourceData *modData =
+      //         static_cast<const CUpti_ModuleResourceData *>(
+      //             resData->resourceDescriptor);
+      //     if (modData && modData->pCubin && modData->cubinSize > 0) {
+      //       DEBUG_PRINTF("[COLAGPU] Module unloading: cubin=%p size=%zu\n",
+      //                    modData->pCubin, modData->cubinSize);
+      //       profiler.pcSampling.unloadModule(modData->pCubin,
+      //                                        modData->cubinSize);
+      //     }
+      //     break;
+      //   }
+      //   case CUPTI_CBID_RESOURCE_CONTEXT_CREATED: {
+      //     CUcontext ctx = resData->context;
+      //     DEBUG_PRINTF("[COLAGPU] Context created: %p\n", ctx);
+      //     profiler.pcSampling.initialize(ctx);
+      //     break;
+      //   }
+      //   case CUPTI_CBID_RESOURCE_CONTEXT_DESTROY_STARTING: {
+      //     CUcontext ctx = resData->context;
+      //     DEBUG_PRINTF("[COLAGPU] Context destroying: %p\n", ctx);
+      //     profiler.pcSampling.finalize(ctx);
+      //     break;
+      //   }
+      //   default:
+      //     break;
+      //   }
+      //   break;
+      // }
+      case CUPTI_CB_DOMAIN_DRIVER_API: {
+        if (isSynchronizeCbid(cbid)) {
+          static thread_local uint64_t syncEnterNs = 0;
+          const CUpti_CallbackData *cbdata =
+              static_cast<const CUpti_CallbackData *>(cbdata_void);
+          if (cbdata->callbackSite == CUPTI_API_ENTER) {
+            syncEnterNs = nowNs();
+          } else if (cbdata->callbackSite == CUPTI_API_EXIT) {
+            uint64_t exitNs = nowNs();
+            const char *name =
+                cbdata->functionName ? cbdata->functionName : "(unknown)";
+            DEBUG_PRINTF("[COLAGPU] Synchronize: cbid=%u, duration=%lu ns, "
+                         "func=%s, correlationId=%u\n",
+                         cbid, exitNs - syncEnterNs, name,
+                         cbdata->correlationId);
+            if (COLAGPU_API_SYNCHRONIZE_ENABLED()) {
+              COLAGPU_API_SYNCHRONIZE(syncEnterNs, exitNs,
+                                      synchronizeKind(cbid));
+            }
+          }
+          break;
         }
-        break;
+        // Non-synchronize DRIVER_API falls through to RUNTIME_API handling
       }
-      case CUPTI_CBID_RESOURCE_MODULE_UNLOAD_STARTING: {
-        const CUpti_ModuleResourceData *modData =
-            static_cast<const CUpti_ModuleResourceData *>(
-                resData->resourceDescriptor);
-        if (modData && modData->pCubin && modData->cubinSize > 0) {
-          DEBUG_PRINTF("[PARCAGPU] Module unloading: cubin=%p size=%zu\n",
-                       modData->pCubin, modData->cubinSize);
-          profiler.pcSampling.unloadModule(modData->pCubin, modData->cubinSize);
+      case CUPTI_CB_DOMAIN_RUNTIME_API: {
+        // Handle both Runtime and Driver API callbacks
+        const CUpti_CallbackData *cbdata =
+            static_cast<const CUpti_CallbackData *>(cbdata_void);
+        uint32_t correlationId = cbdata->correlationId;
+
+        // PC sampling windows are aligned to kernel-launch boundaries:
+        // start on a launch ENTER, stop on a launch EXIT. The decision to
+        // open a window is still time + probability gated; the launch CBIDs
+        // just determine when the boundaries fire.
+        const bool isKernelLaunchCb =
+            domain == CUPTI_CB_DOMAIN_DRIVER_API && proton::isLaunch(cbid);
+
+        // ENTER: open a sampling window on launch boundary if interval+prob
+        // hits.
+        if (cbdata->callbackSite == CUPTI_API_ENTER) {
+          if (domain == CUPTI_CB_DOMAIN_RUNTIME_API)
+            runtimeEnterCorrelationId = correlationId;
+
+          // if (profiler.pcSamplingEnabled) {
+          //   if (isKernelLaunchCb) {
+          //     auto &st = g_pcSamplingState;
+          //     uint64_t now = nowNs();
+          //
+          //     if (!st.active &&
+          //         (now - st.lastCheckNs >= kPCSamplingIntervalNs)) {
+          //       st.lastCheckNs = now;
+          //       const double p =
+          //           g_pcController.probability.load(std::memory_order_relaxed);
+          //       if (threadRandom(st) < p) {
+          //         st.active = true;
+          //         st.windowStartNs = now;
+          //         profiler.pcSampling.start(cbdata->context);
+          //       }
+          //     }
+          //   }
+          //
+          //   profiler.pcSampling.emitMetadata();
+          // }
+          return;
         }
-        break;
-      }
-      case CUPTI_CBID_RESOURCE_CONTEXT_CREATED: {
-        CUcontext ctx = resData->context;
-        DEBUG_PRINTF("[PARCAGPU] Context created: %p\n", ctx);
-        profiler.pcSampling.initialize(ctx);
-        break;
-      }
-      case CUPTI_CBID_RESOURCE_CONTEXT_DESTROY_STARTING: {
-        CUcontext ctx = resData->context;
-        DEBUG_PRINTF("[PARCAGPU] Context destroying: %p\n", ctx);
-        profiler.pcSampling.finalize(ctx);
+
+        // Process on EXIT to avoid adding latency to GPU launch
+        if (cbdata->callbackSite != CUPTI_API_EXIT) {
+          return;
+        }
+        if (domain == CUPTI_CB_DOMAIN_RUNTIME_API && COLAGPU_ERROR_ENABLED()) {
+          cudaError_t *err =
+              reinterpret_cast<cudaError_t *>(cbdata->functionReturnValue);
+          if (*err != cudaSuccess) {
+            int code = (int)*err;
+            const char *message = cudaErrorName(code);
+            char msgBuf[256];
+            if (message)
+              snprintf(msgBuf, sizeof(msgBuf), "%s", message);
+            else
+              snprintf(msgBuf, sizeof(msgBuf), "cudaError_%d", code);
+
+            const char *apiName =
+                cbdata->functionName ? cbdata->functionName : "(unknown)";
+            char compBuf[128];
+            snprintf(compBuf, sizeof(compBuf), "api-%s", apiName);
+            fireError(code, msgBuf, compBuf);
+          }
+        }
+
+        // // EXIT: while a sampling window is open, drain CUPTI's host staging
+        // // buffer on every CUDA API EXIT — not just launch EXITs. Empty
+        // drains
+        // // are cheap (single API call returning 0 PCs) and missed drains lose
+        // // samples (CUPTI_ERROR_OUT_OF_MEMORY when staging fills). Window
+        // close
+        // // is still kernel-launch aligned: only check elapsed-time on a
+        // launch
+        // // EXIT, so the window starts and ends at kernel boundaries.
+        // if (profiler.pcSamplingEnabled) {
+        //   auto &st = g_pcSamplingState;
+        //
+        //   if (st.active) {
+        //     if (isKernelLaunchCb &&
+        //         (nowNs() - st.windowStartNs >= kPCSamplingIntervalNs)) {
+        //       profiler.pcSampling.stop(cbdata->context);
+        //       st.active = false;
+        //       controllerMaybeUpdate();
+        //     } else {
+        //       profiler.pcSampling.collectData(cbdata->context);
+        //     }
+        //   }
+        //
+        //   profiler.pcSampling.emitMetadata();
+        // }
+
+        // Skip correlation/rate-limiter work when no profiler is attached.
+        if (!COLAGPU_API_CORRELATION_ENABLED())
+          return;
+
+        const char *name =
+            cbdata->symbolName ? cbdata->symbolName : cbdata->functionName;
+        int signedCbid;
+
+        if (domain == CUPTI_CB_DOMAIN_DRIVER_API) {
+          // Skip if this driver call is under a runtime call (same correlation
+          // ID)
+          if (correlationId == runtimeEnterCorrelationId) {
+            DEBUG_PRINTF("[COLAGPU] Skipping driver EXIT correlationId=%u - "
+                         "runtime will handle\n",
+                         correlationId);
+            return;
+          }
+          // Pure driver call (no runtime wrapper) - use negative cbid
+          signedCbid = -(int)cbid;
+          DEBUG_PRINTF("[COLAGPU] Driver API callback: cbid=%d, "
+                       "correlationId=%u, func=%s\n",
+                       cbid, correlationId, name);
+        } else if (domain == CUPTI_CB_DOMAIN_RUNTIME_API) {
+          signedCbid = (int)cbid;
+          runtimeEnterCorrelationId = 0; // Clear after use
+          DEBUG_PRINTF("[COLAGPU] Runtime API callback: cbid=%d, "
+                       "correlationId=%u, func=%s\n",
+                       cbid, correlationId, name);
+
+          // Capture pid/tid for memcpy activity correlation: only runtime
+          // cudaMemcpy/cudaMemcpyAsync callbacks need this; kernel launches
+          // and other APIs are irrelevant. Gated on the kernel-timing
+          // semaphore — memcpy pid/tid only feeds kernel_timing events.
+          if (isMemcpyRuntimeCbid(cbid) && COLAGPU_KERNEL_TIMING_ENABLED()) {
+            // Probabilistic sampling: skip recording this memcpy's pid/tid
+            // unless the dice-roll passes. Sampled-out memcpys never enter
+            // memcpyCorrelationMap, so their activity records never emit.
+            if (!sampleRoll()) {
+              return;
+            }
+            g_memcpyCorrelationMap.insert(correlationId, (uint32_t)getpid(),
+                                          (uint32_t)syscall(SYS_gettid));
+            // Prune stale entries to bound memory.
+            if (g_memcpyCorrelationMap.size() > 10000) {
+              uint32_t threshold =
+                  correlationId > 5000 ? correlationId - 5000 : 0;
+              g_memcpyCorrelationMap.trim(threshold);
+            }
+            return;
+          }
+        } else {
+          return;
+        }
+
+        // Check if this is a graph launch (never rate limit these)
+        bool isGraphLaunch = false;
+        if (signedCbid < 0) {
+          // Driver API: cuGraphLaunch = 514, cuGraphLaunch_ptsz = 515
+          int driverCbid = -signedCbid;
+          isGraphLaunch =
+              (driverCbid == CUPTI_DRIVER_TRACE_CBID_cuGraphLaunch ||
+               driverCbid == CUPTI_DRIVER_TRACE_CBID_cuGraphLaunch_ptsz);
+        } else {
+          // Runtime API: cudaGraphLaunch = 311, cudaGraphLaunch_ptsz = 312
+          isGraphLaunch =
+              (signedCbid == CUPTI_RUNTIME_TRACE_CBID_cudaGraphLaunch_v10000 ||
+               signedCbid ==
+                   CUPTI_RUNTIME_TRACE_CBID_cudaGraphLaunch_ptsz_v10000);
+        }
+
+        // Probabilistic sampling: roll the dice for this launch unless it's a
+        // graph launch (those share one correlation ID across many kernels and
+        // are always sampled). Sampled-out launches skip both the USDT probe
+        // and the correlation-filter insert, so their kernel activity records
+        // never match and never emit.
+        if (!isGraphLaunch && !sampleRoll()) {
+          DEBUG_PRINTF("[COLAGPU] Sampling skipped: correlationId=%u\n",
+                       correlationId);
+          return;
+        }
+
+        profiler.outstandingEvents++;
+        // Emit USDT probe with signed cbid (negative for driver, positive for
+        // runtime)
+        COLAGPU_API_CORRELATION(correlationId, signedCbid, name);
+
+        // Insert into correlation filter so we can match kernel activities
+        // later
+        uint32_t launchTid = (uint32_t)syscall(SYS_gettid);
+        if (isGraphLaunch) {
+          g_graphCorrelationMap.insert(correlationId, launchTid);
+          DEBUG_PRINTF(
+              "[COLAGPU] Inserted correlationId=%u into graph map (tid=%u)\n",
+              correlationId, launchTid);
+        } else {
+          g_correlationFilter.insert(correlationId, launchTid);
+          DEBUG_PRINTF("[COLAGPU] Inserted correlationId=%u into correlation "
+                       "filter (tid=%u)\n",
+                       correlationId, launchTid);
+        }
+
+        // Flush if too many events pile up
+        if (profiler.outstandingEvents > 3000) {
+          DEBUG_PRINTF("[COLAGPU] Flushing: outstandingEvents=%zu\n",
+                       profiler.outstandingEvents);
+          if (auto r = proton::cupti::activityFlushAll<false>(0);
+              r != CUPTI_SUCCESS) {
+            DEBUG_PRINTF("[COLAGPU] activityFlushAll failed: %d\n", r);
+          }
+          profiler.outstandingEvents = 0;
+        }
         break;
       }
       default:
         break;
       }
-    } else {
-      // Handle both Runtime and Driver API callbacks
-      const CUpti_CallbackData *cbdata =
-          static_cast<const CUpti_CallbackData *>(cbdata_void);
-      uint32_t correlationId = cbdata->correlationId;
-
-      // PC sampling windows are aligned to kernel-launch boundaries:
-      // start on a launch ENTER, stop on a launch EXIT. The decision to
-      // open a window is still time + probability gated; the launch CBIDs
-      // just determine when the boundaries fire.
-      const bool isKernelLaunchCb =
-          domain == CUPTI_CB_DOMAIN_DRIVER_API && proton::isLaunch(cbid);
-
-      // ENTER: open a sampling window on launch boundary if interval+prob hits.
-      if (cbdata->callbackSite == CUPTI_API_ENTER) {
-        if (domain == CUPTI_CB_DOMAIN_RUNTIME_API)
-          runtimeEnterCorrelationId = correlationId;
-
-        if (profiler.pcSamplingEnabled) {
-          if (isKernelLaunchCb) {
-            auto &st = g_pcSamplingState;
-            uint64_t now = nowNs();
-
-            if (!st.active &&
-                (now - st.lastCheckNs >= kPCSamplingIntervalNs)) {
-              st.lastCheckNs = now;
-              const double p = g_pcController.probability.load(
-                  std::memory_order_relaxed);
-              if (threadRandom(st) < p) {
-                st.active = true;
-                st.windowStartNs = now;
-                profiler.pcSampling.start(cbdata->context);
-              }
-            }
-          }
-
-          profiler.pcSampling.emitMetadata();
-        }
-        return;
-      }
-
-      // Process on EXIT to avoid adding latency to GPU launch
-      if (cbdata->callbackSite != CUPTI_API_EXIT) {
-        return;
-      }
-
-      // EXIT: while a sampling window is open, drain CUPTI's host staging
-      // buffer on every CUDA API EXIT — not just launch EXITs. Empty drains
-      // are cheap (single API call returning 0 PCs) and missed drains lose
-      // samples (CUPTI_ERROR_OUT_OF_MEMORY when staging fills). Window close
-      // is still kernel-launch aligned: only check elapsed-time on a launch
-      // EXIT, so the window starts and ends at kernel boundaries.
-      if (profiler.pcSamplingEnabled) {
-        auto &st = g_pcSamplingState;
-
-        if (st.active) {
-          if (isKernelLaunchCb &&
-              (nowNs() - st.windowStartNs >= kPCSamplingIntervalNs)) {
-            profiler.pcSampling.stop(cbdata->context);
-            st.active = false;
-            controllerMaybeUpdate();
-          } else {
-            profiler.pcSampling.collectData(cbdata->context);
-          }
-        }
-
-        profiler.pcSampling.emitMetadata();
-      }
-
-      // Skip correlation/rate-limiter work when no profiler is attached.
-      if (!PARCAGPU_CUDA_CORRELATION_ENABLED())
-        return;
-
-      const char *name =
-          cbdata->symbolName ? cbdata->symbolName : cbdata->functionName;
-      int signedCbid;
-
-      if (domain == CUPTI_CB_DOMAIN_DRIVER_API) {
-        // Skip if this driver call is under a runtime call (same correlation
-        // ID)
-        if (correlationId == runtimeEnterCorrelationId) {
-          DEBUG_PRINTF("[PARCAGPU] Skipping driver EXIT correlationId=%u - "
-                       "runtime will handle\n",
-                       correlationId);
-          return;
-        }
-        // Pure driver call (no runtime wrapper) - use negative cbid
-        signedCbid = -(int)cbid;
-        DEBUG_PRINTF("[PARCAGPU] Driver API callback: cbid=%d, "
-                     "correlationId=%u, func=%s\n",
-                     cbid, correlationId, name);
-      } else if (domain == CUPTI_CB_DOMAIN_RUNTIME_API) {
-        signedCbid = (int)cbid;
-        runtimeEnterCorrelationId = 0; // Clear after use
-        DEBUG_PRINTF("[PARCAGPU] Runtime API callback: cbid=%d, "
-                     "correlationId=%u, func=%s\n",
-                     cbid, correlationId, name);
-      } else {
-        return;
-      }
-
-      // Check if this is a graph launch (never rate limit these)
-      bool isGraphLaunch = false;
-      if (signedCbid < 0) {
-        // Driver API: cuGraphLaunch = 514, cuGraphLaunch_ptsz = 515
-        int driverCbid = -signedCbid;
-        isGraphLaunch =
-            (driverCbid == CUPTI_DRIVER_TRACE_CBID_cuGraphLaunch ||
-             driverCbid == CUPTI_DRIVER_TRACE_CBID_cuGraphLaunch_ptsz);
-      } else {
-        // Runtime API: cudaGraphLaunch = 311, cudaGraphLaunch_ptsz = 312
-        isGraphLaunch =
-            (signedCbid == CUPTI_RUNTIME_TRACE_CBID_cudaGraphLaunch_v10000 ||
-             signedCbid ==
-                 CUPTI_RUNTIME_TRACE_CBID_cudaGraphLaunch_ptsz_v10000);
-      }
-
-      // Rate limit probes using token bucket.  Skip rate limiting for graph
-      // launches (they share one correlation ID across many kernels) and when
-      // PC sampling is active (every kernel needs its correlation callback so
-      // PC samples can be matched with CPU stacks on the agent side).
-      if (!isGraphLaunch && !g_pcSamplingState.active) {
-        if (!callbackLimiter.tryAcquire()) {
-          DEBUG_PRINTF(
-              "[PARCAGPU] Rate limited: skipping probe for correlationId=%u\n",
-              correlationId);
-          return;
-        }
-      }
-
-      profiler.outstandingEvents++;
-      // Emit USDT probe with signed cbid (negative for driver, positive for
-      // runtime)
-      PARCAGPU_CUDA_CORRELATION(correlationId, signedCbid, name);
-
-      // Insert into correlation filter so we can match kernel activities later
-      if (isGraphLaunch) {
-        g_graphCorrelationMap.insert(correlationId);
-        DEBUG_PRINTF("[PARCAGPU] Inserted correlationId=%u into graph map\n",
-                     correlationId);
-      } else {
-        g_correlationFilter.insert(correlationId);
-        DEBUG_PRINTF(
-            "[PARCAGPU] Inserted correlationId=%u into correlation filter\n",
-            correlationId);
-      }
-
-      // Flush if too many events pile up
-      if (profiler.outstandingEvents > 3000) {
-        DEBUG_PRINTF("[PARCAGPU] Flushing: outstandingEvents=%zu\n",
-                     profiler.outstandingEvents);
-        if (auto r = proton::cupti::activityFlushAll<false>(0);
-            r != CUPTI_SUCCESS) {
-          DEBUG_PRINTF("[PARCAGPU] activityFlushAll failed: %d\n", r);
-        }
-        profiler.outstandingEvents = 0;
-      }
-    }
     } catch (const std::exception &e) {
-      fprintf(stderr, "[PARCAGPU] callbackHandler caught: %s\n", e.what());
+      fprintf(stderr, "[COLAGPU] callbackHandler caught: %s\n", e.what());
     } catch (...) {
-      fprintf(stderr, "[PARCAGPU] callbackHandler caught unknown exception\n");
+      fprintf(stderr, "[COLAGPU] callbackHandler caught unknown exception\n");
     }
   }
 };
@@ -713,7 +1405,7 @@ private:
 // Called from the CUDA driver, which wasn't built with C++ EH; a throw out
 // of here would abort the host process. Catch everything at the boundary.
 extern "C" int InitializeInjection(void) {
-  DEBUG_PRINTF("[PARCAGPU] InitializeInjection called\n");
+  DEBUG_PRINTF("[COLAGPU] InitializeInjection called\n");
   try {
     auto &profiler = parcagpu::CuptiProfiler::instance();
     if (!profiler.initialize()) {
@@ -723,17 +1415,17 @@ extern "C" int InitializeInjection(void) {
       try {
         parcagpu::CuptiProfiler::instance().cleanup();
       } catch (const std::exception &e) {
-        fprintf(stderr, "[PARCAGPU] cleanup caught: %s\n", e.what());
+        fprintf(stderr, "[COLAGPU] cleanup caught: %s\n", e.what());
       } catch (...) {
-        fprintf(stderr, "[PARCAGPU] cleanup caught unknown exception\n");
+        fprintf(stderr, "[COLAGPU] cleanup caught unknown exception\n");
       }
     });
     return 1;
   } catch (const std::exception &e) {
-    fprintf(stderr, "[PARCAGPU] InitializeInjection caught: %s\n", e.what());
+    fprintf(stderr, "[COLAGPU] InitializeInjection caught: %s\n", e.what());
     return 0;
   } catch (...) {
-    fprintf(stderr, "[PARCAGPU] InitializeInjection caught unknown exception\n");
+    fprintf(stderr, "[COLAGPU] InitializeInjection caught unknown exception\n");
     return 0;
   }
 }

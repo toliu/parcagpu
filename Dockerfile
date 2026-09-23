@@ -1,4 +1,4 @@
-# Slim multi-platform build for libparcagpucupti.so
+# Slim multi-platform build for libcolacupti.so
 # Uses pre-built CUDA header images instead of full CUDA development images
 # This significantly reduces build time and disk space requirements
 #
@@ -31,6 +31,7 @@ COPY --from=cuda-headers /usr/local/cuda /usr/local/cuda
 COPY src /build/src
 COPY proton /build/proton
 COPY CMakeLists.txt /build/
+COPY ascend /build/ascend
 
 # Build the library (disable tests for Docker build)
 RUN mkdir -p build && \
@@ -40,8 +41,8 @@ RUN mkdir -p build && \
 
 # Export stage for extracting the library (used by Makefile and release binaries)
 FROM scratch AS export
-COPY --from=builder /build/build/lib/libparcagpucupti.so /
+COPY --from=builder /build/build/lib/libcola*.so /
 
 # Runtime image (for container registry)
 FROM busybox:latest AS runtime
-COPY --from=builder /build/build/lib/libparcagpucupti.so /usr/lib/libparcagpucupti.so
+COPY --from=builder /build/build/lib/libcola*.so /usr/lib/

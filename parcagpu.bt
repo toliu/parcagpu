@@ -1,36 +1,12 @@
 #!/usr/bin/env bpftrace
 
 BEGIN {
-    printf("Monitoring CUDA activity via parcagpu USDT probes...\n");
+    printf("Monitoring colagpu USDT probes: %s ...\n", $1);
     printf("%-20s %-12s %-10s %-10s %-10s %-10s %-10s %-10s %s\n",
            "TIME", "DURATION_NS", "CORR_ID", "DEVICE", "STREAM", "GRAPH", "NODE", "START", "KERNEL");
 }
 
-usdt:*:parcagpu:kernel_executed {
-    $start = arg0;
-    $end = arg1;
-    $duration = $end - $start;
-    $correlation_id = arg2;
-    $device_id = arg3;
-    $stream_id = arg4;
-    $graph_id = arg5;
-    $graph_node_id = arg6;
-    $kernel_name = str(arg7);
-
-    printf("%-12s.%-6u %-12lu %-10u %-10u %-10u %-10u %-10lu %-10lu ",
-           strftime("%H:%M:%S", nsecs),
-           (nsecs % 1000000000) / 1000,
-           $duration,
-           $correlation_id,
-           $device_id,
-           $stream_id,
-           $graph_id,
-           $graph_node_id,
-           $start);
-    printf("%s\n", $kernel_name);
-}
-
-usdt:*:parcagpu:cuda_correlation {
+usdt:$1:colagpu:api_correlation {
     $correlation_id = arg0;
     $cbid = arg1;
     $name = str(arg2);
@@ -38,85 +14,131 @@ usdt:*:parcagpu:cuda_correlation {
     printf("%-12s.%-6u [CORR] %u: cbid=%u %s\n", strftime("%H:%M:%S", nsecs), (nsecs % 1000000000) / 1000, $correlation_id, $cbid, $name);
 }
 
-usdt:*:parcagpu:pc_sample_batch {
-    $records = arg0;
-    $count = arg1;
+usdt:$1:colagpu:api_synchronize {
+    $start = arg0;
+    $end = arg1;
+    $kind = arg2;
+    $dur_ns = $end - $start;
+    $kindStr = ($kind == 100) ? "cuStreamSynchronize" :
+               (($kind == 101) ? "cuCtxSynchronize" :
+               (($kind == 102) ? "cuEventSynchronize" :
+               (($kind == 103) ? "cuStreamSynchronize_ptsz" : "unknown")));
 
-    printf("%-12s.%-6u [PC_BATCH] count=%u records=%p\n",
+    printf("%-12s.%-6u [SYNC] kind=%u %s start=%lu end=%lu dur=%lu ns\n",
            strftime("%H:%M:%S", nsecs),
            (nsecs % 1000000000) / 1000,
-           $count,
-           $records);
+           $kind, $kindStr, $start, $end, $dur_ns);
 }
 
-usdt:*:parcagpu:stall_reason_map {
-    $names = arg0;
-    $count = arg1;
-
-    printf("%-12s.%-6u [STALL_MAP] count=%u base=%p\n",
-           strftime("%H:%M:%S", nsecs),
-           (nsecs % 1000000000) / 1000,
-           $count,
-           $names);
-}
-
-usdt:*:parcagpu:cubin_loaded {
-    $cubin_crc = arg0;
-    $cubin_size = arg2;
-
-    printf("%-12s.%-6u [CUBIN_LOAD] crc=0x%lx size=%lu\n",
-           strftime("%H:%M:%S", nsecs),
-           (nsecs % 1000000000) / 1000,
-           $cubin_crc,
-           $cubin_size);
-}
-
-usdt:*:parcagpu:cubin_unloaded {
-    $cubin_crc = arg0;
-
-    printf("%-12s.%-6u [CUBIN_UNLOAD] crc=0x%lx\n",
-           strftime("%H:%M:%S", nsecs),
-           (nsecs % 1000000000) / 1000,
-           $cubin_crc);
-}
-
-usdt:*:parcagpu:activity_batch {
+usdt:$1:colagpu:host_timing {
     $ptrs = arg0;
     $count = arg1;
 
-    printf("%-12s.%-6u [ACT_BATCH] count=%u ptrs=%p\n",
+    printf("%-12s.%-6u [HOST_TIMING] count=%u\n",
            strftime("%H:%M:%S", nsecs),
            (nsecs % 1000000000) / 1000,
-           $count,
-           $ptrs);
+           $count);
+
+    // Host-side timing (ACTIVITY_KIND_HOST_API = 2). Only kind/start/end/
+    // correlationId are populated; the rest of ActivityEvent stays zeroed.
+    //   +0:  kind (u64)
+    //   +8:  start (u64)
+    //  +16:  end (u64)
+    //  +24:  correlationId (u32)
+    $limit = $count;
+    if ($limit > 128) {
+        $limit = 128;
+    }
+    if ($limit > 0) {
+        for ($i : 0..($limit - 1)) {
+            $r = *(uint64 *)($ptrs + $i * 8);
+            if ($r == 0) { continue; }
+            $dur = (int64)(*(uint64 *)($r + 16)) - (int64)(*(uint64 *)($r + 8));
+            printf("  [%d] HOSTAPI corr=%u dur=%ld\n",
+                $i,
+                *(uint32 *)($r + 24),
+                $dur);
+        }
+    }
+
+    if ($count > 128) {
+        printf("  ... +%u more\n", $count - 128);
+    }
 }
 
-usdt:*:parcagpu:gpu_config {
-    $device_id = arg0;
-    $sampling_factor = arg1;
-    $clock_khz = arg2;
-    $sm_count = arg3;
+usdt:$1:colagpu:kernel_timing {
+    $ptrs = arg0;
+    $count = arg1;
 
-    printf("%-12s.%-6u [GPU_CONFIG] dev=%u factor=%u clock_khz=%u sm_count=%u\n",
+    printf("%-12s.%-6u [KERNEL_TIMING] count=%u\n",
            strftime("%H:%M:%S", nsecs),
            (nsecs % 1000000000) / 1000,
-           $device_id,
-           $sampling_factor,
-           $clock_khz,
-           $sm_count);
-}
+           $count);
 
-usdt:*:parcagpu:error {
-    $code = arg0;
-    $message = str(arg1);
-    $component = str(arg2);
+    // ActivityEvent layout (packed, aligned 8, 72 bytes total):
+    //   +0:  kind (u64)
+    //   +8:  start (u64)
+    //  +16:  end (u64)
+    //  +24:  correlationId (u32)
+    //  +28:  deviceId (u32)
+    //  +32:  streamId (u32)
+    //  +36:  tid (u32)                   --- memcpy only: thread ID
+    //  +40:  bytes (u64)                 --- memcpy only
+    //  +48:  copyKind (u16)              --- memcpy only, vendor-neutral: 100=H2D, 101=D2H/D2D, 103=P2P
+    //  +50:  sync (u16)                  --- memcpy only: 1=sync, 0=async
+    //  +52:  graphId (u32)               --- kernel only
+    //  +56:  graphNodeId (u64)           --- kernel only
+    //  +64:  name (const char *)         --- kernel only: points into CUPTI buffer
+    $limit = $count;
+    if ($limit > 128) {
+        $limit = 128;
+    }
+    if ($limit > 0) {
+        for ($i : 0..($limit - 1)) {
+            $r = *(uint64 *)($ptrs + $i * 8);
+            if ($r == 0) { continue; }
+            $kind = *(uint64 *)($r);
+            $dur = (int64)(*(uint64 *)($r + 16)) - (int64)(*(uint64 *)($r + 8));
+            if ($kind == 1) {
+                // ACTIVITY_KIND_KERNEL
+                $name_ptr = *(uint64 *)($r + 64);
+                printf("  [%d] KERNEL  corr=%u dev=%u strm=%u gid=%u node=%lu dur=%ld name=%s\n",
+                    $i,
+                    *(uint32 *)($r + 24),
+                    *(uint32 *)($r + 28),
+                    *(uint32 *)($r + 32),
+                    *(uint32 *)($r + 52),
+                    *(uint64 *)($r + 56),
+                    $dur,
+                    str($name_ptr));
+            } else if ($kind == 3) {
+                // ACTIVITY_KIND_MEMCPY
+                $copyKind = *(uint16 *)($r + 48);
+                $kindStr = ($copyKind == 100) ? "H2D" : (($copyKind == 101) ? "D2H/D2D" : (($copyKind == 103) ? "P2P" : "?"));
+                printf("  [%d] MEMCPY  %-7s bytes=%lu  corr=%u dev=%u strm=%u dur=%ld  sync=%u tid=%u\n",
+                    $i,
+                    $kindStr,
+                    *(uint64 *)($r + 40),
+                    *(uint32 *)($r + 24),
+                    *(uint32 *)($r + 28),
+                    *(uint32 *)($r + 32),
+                    $dur,
+                    *(uint16 *)($r + 50),
+                    *(uint32 *)($r + 36));
+            } else {
+                // Unknown kind — log raw value instead of dropping.
+                printf("  [%d] UNKNOWN kind=%lu dur=%ld corr=%u\n",
+                    $i,
+                    $kind,
+                    $dur,
+                    *(uint32 *)($r + 24));
+            }
+        }
+    }
 
-    printf("%-12s.%-6u [ERROR] code=%d component=%s msg=%s\n",
-           strftime("%H:%M:%S", nsecs),
-           (nsecs % 1000000000) / 1000,
-           $code,
-           $component,
-           $message);
+    if ($count > 128) {
+        printf("  ... +%u more\n", $count - 128);
+    }
 }
 
 END {
