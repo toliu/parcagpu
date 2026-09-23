@@ -6,14 +6,40 @@ BEGIN {
            "TIME", "DURATION_NS", "CORR_ID", "DEVICE", "STREAM", "GRAPH", "NODE", "START", "KERNEL");
 }
 
+// ---------------------------------------------------------------------------
+// api_correlation: fired on runtime-API EXIT for sampled launches.
+//   arg0 = correlationId (u32)
+//   arg1 = cbid          (int)  — backend callback id:
+//          * CUPTI/NVIDIA: CUpti_CallbackId
+//          * MSPTI/Ascend: msptiCallbackId (MSPTI_CBID_RUNTIME_*)
+//   arg2 = name          (str)  — API name. MSPTI: "aclrtLaunchKernel",
+//                                  "aclnnAdd", ...; CUPTI: "cuLaunchKernel", ...
+// ---------------------------------------------------------------------------
 usdt:$1:colagpu:api_correlation {
     $correlation_id = arg0;
     $cbid = arg1;
     $name = str(arg2);
 
-    printf("%-12s.%-6u [CORR] %u: cbid=%u %s\n", strftime("%H:%M:%S", nsecs), (nsecs % 1000000000) / 1000, $correlation_id, $cbid, $name);
+    // MSPTI runtime CBIDs that parcagpu subscribes to (see mspti_cbid.h).
+    // CUPTI runs use a different id space — there the raw cbid + $name are the
+    // reliable identifiers and this name lookup is simply empty.
+    $cbidName = ($cbid == 9)  ? "stream_synchronized" :
+                (($cbid == 10) ? "launch" :
+                (($cbid == 12) ? "aicpu_launch" :
+                (($cbid == 13) ? "aiv_launch" :
+                (($cbid == 14) ? "ffts_launch" :
+                (($cbid == 22) ? "memcpy" :
+                (($cbid == 24) ? "memcpy_async" : ""))))));
+
+    printf("%-12s.%-6u [CORR] %u: cbid=%d %-20s %s\n",
+           strftime("%H:%M:%S", nsecs), (nsecs % 1000000000) / 1000,
+           $correlation_id, $cbid, $name, $cbidName);
 }
 
+// ---------------------------------------------------------------------------
+// api_synchronize: fired on synchronize-API EXIT. syncKind is vendor-neutral
+// and backend-partitioned: 100-199 = CUPTI (NVIDIA), 200-299 = MSPTI (Ascend).
+// ---------------------------------------------------------------------------
 usdt:$1:colagpu:api_synchronize {
     $start = arg0;
     $end = arg1;
@@ -22,12 +48,30 @@ usdt:$1:colagpu:api_synchronize {
     $kindStr = ($kind == 100) ? "cuStreamSynchronize" :
                (($kind == 101) ? "cuCtxSynchronize" :
                (($kind == 102) ? "cuEventSynchronize" :
-               (($kind == 103) ? "cuStreamSynchronize_ptsz" : "unknown")));
+               (($kind == 103) ? "cuStreamSynchronize_ptsz" :
+               (($kind == 200) ? "aclrtSynchronizeStream" : "unknown"))));
 
     printf("%-12s.%-6u [SYNC] kind=%u %s start=%lu end=%lu dur=%lu ns\n",
            strftime("%H:%M:%S", nsecs),
            (nsecs % 1000000000) / 1000,
            $kind, $kindStr, $start, $end, $dur_ns);
+}
+
+// ---------------------------------------------------------------------------
+// error: fired when a runtime API returns a non-zero code (CUPTI + MSPTI).
+//   arg0 = code      (int32)  — aclError (MSPTI) / cudaError (CUPTI)
+//   arg1 = message   (str)    — e.g. "ACL_ERROR_RT_PARAM_INVALID"
+//   arg2 = component (str)    — MSPTI: "api-<functionName>"; CUPTI: "api-<func>"
+// ---------------------------------------------------------------------------
+usdt:$1:colagpu:error {
+    $code = arg0;
+    $message = str(arg1);
+    $component = str(arg2);
+
+    printf("%-12s.%-6u [ERROR] code=%d %s (%s)\n",
+           strftime("%H:%M:%S", nsecs),
+           (nsecs % 1000000000) / 1000,
+           $code, $message, $component);
 }
 
 usdt:$1:colagpu:host_timing {
@@ -86,9 +130,9 @@ usdt:$1:colagpu:kernel_timing {
     //  +40:  bytes (u64)                 --- memcpy only
     //  +48:  copyKind (u16)              --- memcpy only, vendor-neutral: 100=H2D, 101=D2H/D2D, 103=P2P
     //  +50:  sync (u16)                  --- memcpy only: 1=sync, 0=async
-    //  +52:  graphId (u32)               --- kernel only
-    //  +56:  graphNodeId (u64)           --- kernel only
-    //  +64:  name (const char *)         --- kernel only: points into CUPTI buffer
+    //  +52:  graphId (u32)               --- kernel only, CUPTI only (0 for MSPTI)
+    //  +56:  graphNodeId (u64)           --- kernel only, CUPTI only (0 for MSPTI)
+    //  +64:  name (const char *)         --- kernel only: CUPTI buffer / MSPTI k->name
     $limit = $count;
     if ($limit > 128) {
         $limit = 128;

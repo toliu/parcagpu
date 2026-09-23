@@ -4,6 +4,7 @@
 #include "pc_sampling.h"
 #include "Driver/GPU/CudaApi.h"
 #include "Driver/GPU/CuptiApi.h"
+#include "error.h"
 #include "probes.h"
 #include <cstdio>
 #include <cstdlib>
@@ -571,11 +572,6 @@ void PCSampling::stop(CUcontext context) {
   DEBUG_PRINTF("PC sampling stopped (kernels concurrent)\n");
   // Drain data collected during this window.
   collectData(context);
-}
-
-__attribute__((noinline)) void fireError(int32_t code, const char *message,
-                                         const char *component) {
-  COLAGPU_ERROR(code, message, component);
 }
 
 void PCSampling::processPCSamplingData(ConfigureData *configureData) {

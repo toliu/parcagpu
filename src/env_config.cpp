@@ -2,7 +2,8 @@
 // SPDX-License-Identifier: Apache-2.0
 
 #include "env_config.h"
-#include "pc_sampling.h" // DEBUG_PRINTF, fireError
+#include "error.h"
+#include "pc_sampling.h" // DEBUG_PRINTF
 #include "probes.h"
 
 #include <cstdlib>

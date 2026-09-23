@@ -19,8 +19,8 @@ build-%:
 		--output type=local,dest=/tmp/parcagpu-build-$* \
 		--platform linux/$* .
 	@mkdir -p build/$*
-	@cp /tmp/parcagpu-build-$*/libcola*.so build/$*/
-	@echo "$* library built: build/$*/"
+	@cp /tmp/parcagpu-build-$*/libcola*.so archive/$*/
+	@echo "$* library built: archive/$*/"
 
 # Build runtime container image for both architectures
 # Multi-platform images stay in buildx cache. Use docker-push to push to registry.

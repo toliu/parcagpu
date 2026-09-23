@@ -186,9 +186,6 @@ private:
   std::atomic<uint64_t> lastRefreshNs{0};
 };
 
-// Fire the error USDT probe. Callable from any translation unit.
-void fireError(int32_t code, const char *message, const char *component);
-
 } // namespace parcagpu
 
 #endif // COLAGPU_PC_SAMPLING_H_

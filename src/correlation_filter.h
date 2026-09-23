@@ -22,6 +22,11 @@ public:
   void insert(uint32_t correlation_id, uint32_t tid);
   // Returns true and fills *tid if correlation_id was found (and removes it).
   bool check_and_remove(uint32_t correlation_id, uint32_t *tid);
+  // Returns true if correlation_id is present without removing it. Used by the
+  // host-side runtime-API activity so a sampled launch can emit host timing
+  // while the kernel activity still consumes the same entry via
+  // check_and_remove.
+  bool check(uint32_t correlation_id) const;
   // Remove all entries with correlation_id < threshold.
   // When threshold is 0, this is equivalent to clear().
   void trim(uint32_t threshold);

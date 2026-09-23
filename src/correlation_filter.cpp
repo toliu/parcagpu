@@ -26,6 +26,11 @@ bool CorrelationFilter::check_and_remove(uint32_t correlation_id,
   return false;
 }
 
+bool CorrelationFilter::check(uint32_t correlation_id) const {
+  std::lock_guard<std::mutex> lock(mutex_);
+  return map_.find(correlation_id) != map_.end();
+}
+
 void CorrelationFilter::trim(uint32_t threshold) {
   std::lock_guard<std::mutex> lock(mutex_);
   if (threshold == 0) {
