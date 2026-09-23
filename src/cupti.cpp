@@ -3,12 +3,15 @@
 
 #include <algorithm>
 #include <atomic>
+#include <chrono>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <dlfcn.h>
+#include <fstream>
 #include <sys/syscall.h>
+#include <thread>
 #include <time.h>
 #include <unistd.h>
 
@@ -21,7 +24,6 @@
 #include "correlation_filter.h"
 #include "env_config.h"
 #include "pc_sampling.h"
-#include "token_bucket.h"
 
 constexpr std::array<CUpti_CallbackId, 4> kSynchronizeCallbacks = {
     CUPTI_DRIVER_TRACE_CBID_cuStreamSynchronize,
@@ -371,9 +373,89 @@ static std::atomic<uint32_t> g_bufferCycle{0};
 // runtime calls)
 thread_local uint32_t runtimeEnterCorrelationId = 0;
 
-// Thread-local rate limiter for callback probes (default 100/sec,
-// configurable via COLAGPU_RATE_LIMIT).
-thread_local TokenBucket callbackLimiter(100.0);
+// Probabilistic sampling threshold, per-mille in [0, 1000]: 1000 samples
+// every launch, 0 samples none. Published by a detached background thread
+// that polls a threshold file; read on the CUPTI callback hot path via a
+// relaxed load so the callback stays non-blocking.
+static std::atomic<uint32_t> g_sampleThreshold{1000};
+
+// Fixed path read by the background thread. The Go agent writes the same
+// path through /proc/<pid>/root/tmp/parcagpu.threshold (it runs with
+// hostPID), which resolves to this process's /tmp.
+constexpr const char *kThresholdPath = "/tmp/parcagpu.threshold";
+
+// Poll interval for the threshold reader thread.
+constexpr auto kThresholdPollInterval = std::chrono::seconds(5);
+
+// Thread-local xorshift32 RNG for the sampling dice-roll. std::rand() keeps
+// global state and std::random_device may block — both are off-limits inside
+// a CUPTI callback. xorshift32 touches only thread-local state and is
+// lock-free.
+thread_local uint32_t g_randState = 0;
+inline uint32_t fastRand() {
+  uint32_t x = g_randState;
+  if (x == 0) {
+    x = static_cast<uint32_t>(syscall(SYS_gettid)) * 2654435761u ^ 0x9e3779b9u;
+    if (x == 0)
+      x = 0x9e3779b9u;
+  }
+  x ^= x << 13;
+  x ^= x >> 17;
+  x ^= x << 5;
+  g_randState = x;
+  return x;
+}
+
+// Roll the sampling dice; returns true when this launch should be recorded.
+inline bool sampleRoll() {
+  uint32_t t = g_sampleThreshold.load(std::memory_order_relaxed);
+  if (t >= 1000)
+    return true;
+  if (t == 0)
+    return false;
+  return (fastRand() % 1000u) < t;
+}
+
+// Detached reader thread and its shutdown flag.
+static std::atomic<bool> g_thresholdThreadRunning{false};
+static std::thread g_thresholdThread;
+
+// Background reader: polls kThresholdPath every kThresholdPollInterval and
+// publishes the parsed value into g_sampleThreshold. Blocking I/O lives here
+// (never in a CUPTI callback); a missing or malformed file keeps the previous
+// value.
+static void thresholdPollThread() {
+  while (g_thresholdThreadRunning.load(std::memory_order_relaxed)) {
+    std::ifstream in(kThresholdPath);
+    if (in.good()) {
+      uint32_t v = 0;
+      if (in >> v) {
+        if (v > 1000)
+          v = 1000;
+        g_sampleThreshold.store(v, std::memory_order_relaxed);
+      }
+    }
+    // Sleep in small slices so shutdown (which flips the running flag) takes
+    // effect within ~100ms rather than waiting out a full interval.
+    for (int i = 0;
+         i < 50 && g_thresholdThreadRunning.load(std::memory_order_relaxed);
+         ++i) {
+      std::this_thread::sleep_for(
+          std::chrono::duration_cast<std::chrono::milliseconds>(
+              kThresholdPollInterval) /
+          50);
+    }
+  }
+}
+
+// Starts the detached threshold reader thread exactly once.
+static void startThresholdPollThread() {
+  bool expected = false;
+  if (!g_thresholdThreadRunning.compare_exchange_strong(expected, true))
+    return; // already running
+  g_thresholdThread = std::thread(thresholdPollThread);
+  g_thresholdThread.detach();
+}
 
 // //
 // ---------------------------------------------------------------------------
@@ -512,13 +594,6 @@ void init_debug() {
   if (!initialized) {
     initialized = true;
     debug_enabled = getenv("COLAGPU_DEBUG") != nullptr;
-    const char *rateEnv = getenv("COLAGPU_RATE_LIMIT");
-    if (rateEnv != nullptr) {
-      double rate = atof(rateEnv);
-      if (rate > 0) {
-        callbackLimiter.setRate(rate);
-      }
-    }
 
     // const char *targetRateEnv = getenv("COLAGPU_PC_SAMPLING_RATE");
     // if (targetRateEnv) {
@@ -650,6 +725,8 @@ public:
       }
     }
 
+    startThresholdPollThread();
+
     DEBUG_PRINTF("[COLAGPU] Successfully initialized CUPTI callbacks\n");
     return true;
   }
@@ -710,6 +787,9 @@ public:
       }
       subscriber = nullptr;
     }
+
+    // Stop the threshold reader thread (detached; it exits within ~100ms).
+    g_thresholdThreadRunning.store(false, std::memory_order_relaxed);
 
     DEBUG_PRINTF("[COLAGPU] Cleanup completed\n");
   }
@@ -1094,8 +1174,7 @@ private:
                          "func=%s, correlationId=%u\n",
                          cbid, exitNs - syncEnterNs, name,
                          cbdata->correlationId);
-            if (COLAGPU_API_SYNCHRONIZE_ENABLED() &&
-                callbackLimiter.tryAcquire()) {
+            if (COLAGPU_API_SYNCHRONIZE_ENABLED()) {
               COLAGPU_API_SYNCHRONIZE(syncEnterNs, exitNs,
                                       synchronizeKind(cbid));
             }
@@ -1230,6 +1309,12 @@ private:
           // and other APIs are irrelevant. Gated on the kernel-timing
           // semaphore — memcpy pid/tid only feeds kernel_timing events.
           if (isMemcpyRuntimeCbid(cbid) && COLAGPU_KERNEL_TIMING_ENABLED()) {
+            // Probabilistic sampling: skip recording this memcpy's pid/tid
+            // unless the dice-roll passes. Sampled-out memcpys never enter
+            // memcpyCorrelationMap, so their activity records never emit.
+            if (!sampleRoll()) {
+              return;
+            }
             g_memcpyCorrelationMap.insert(correlationId, (uint32_t)getpid(),
                                           (uint32_t)syscall(SYS_gettid));
             // Prune stale entries to bound memory.
@@ -1260,18 +1345,15 @@ private:
                    CUPTI_RUNTIME_TRACE_CBID_cudaGraphLaunch_ptsz_v10000);
         }
 
-        // Rate limit probes using token bucket.  Skip rate limiting for graph
-        // launches (they share one correlation ID across many kernels) and when
-        // PC sampling is active (every kernel needs its correlation callback so
-        // PC samples can be matched with CPU stacks on the agent side).
-        // if (!isGraphLaunch && !g_pcSamplingState.active) {
-        if (!isGraphLaunch) {
-          if (!callbackLimiter.tryAcquire()) {
-            DEBUG_PRINTF("[COLAGPU] Rate limited: skipping probe for "
-                         "correlationId=%u\n",
-                         correlationId);
-            return;
-          }
+        // Probabilistic sampling: roll the dice for this launch unless it's a
+        // graph launch (those share one correlation ID across many kernels and
+        // are always sampled). Sampled-out launches skip both the USDT probe
+        // and the correlation-filter insert, so their kernel activity records
+        // never match and never emit.
+        if (!isGraphLaunch && !sampleRoll()) {
+          DEBUG_PRINTF("[COLAGPU] Sampling skipped: correlationId=%u\n",
+                       correlationId);
+          return;
         }
 
         profiler.outstandingEvents++;

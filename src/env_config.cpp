@@ -15,7 +15,6 @@ namespace parcagpu {
 // Known COLAGPU_* environment variables.
 static const char *knownVars[] = {
     "COLAGPU_DEBUG",
-    "COLAGPU_RATE_LIMIT",
     "COLAGPU_SAMPLING_FACTOR",
     "COLAGPU_PC_SAMPLING_RATE",
 };
@@ -57,17 +56,6 @@ void validateEnvVars() {
 
   // Validate specific variables.
   const char *val;
-
-  val = std::getenv("COLAGPU_RATE_LIMIT");
-  if (val) {
-    double rate = std::atof(val);
-    if (rate <= 0) {
-      DEBUG_PRINTF("[COLAGPU] Warning: COLAGPU_RATE_LIMIT=%s invalid "
-                   "(must be > 0), using default\n",
-                   val);
-      fireError(0, val, "env_config: COLAGPU_RATE_LIMIT invalid");
-    }
-  }
 
   val = std::getenv("COLAGPU_SAMPLING_FACTOR");
   if (val) {
