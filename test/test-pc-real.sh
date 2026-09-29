@@ -15,7 +15,7 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 
-LIB="$ROOT/build-local/lib/libparcagpucupti.so"
+LIB="$ROOT/build-local/lib/libcolacupti.so"
 TOY="$ROOT/microbenchmarks/pc_sample_toy"
 BPF="$ROOT/test/bpf/activity_parser"
 BPF_LOG="/tmp/parcagpu-pc-test-bpf.log"
@@ -45,15 +45,15 @@ trap cleanup EXIT
 
 # --- Launch the toy workload ---
 echo "=== Starting pc_sample_toy ==="
-PARCAGPU_DEBUG=1 \
-  PARCAGPU_PC_SAMPLING_RATE=10000 \
+COLAGPU_DEBUG=1 \
+  COLAGPU_PC_SAMPLING_RATE=10000 \
   CUDA_INJECTION64_PATH="$LIB" "$TOY" 8 > "$TOY_LOG" 2>&1 &
 TOY_PID=$!
 echo "pc_sample_toy PID: $TOY_PID"
 
 # Wait for library to be loaded into the process.
 while kill -0 "$TOY_PID" 2>/dev/null &&
-      ! grep -q libparcagpucupti "/proc/$TOY_PID/maps" 2>/dev/null; do
+      ! grep -q libcolacupti "/proc/$TOY_PID/maps" 2>/dev/null; do
   sleep 0.1
 done
 

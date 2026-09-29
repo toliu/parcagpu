@@ -42,8 +42,8 @@ jobs:
         run: |
           echo "=== Build artifacts ==="
           ls -lh build/amd64/
-          file build/amd64/libparcagpucupti.so
-          readelf -n build/amd64/libparcagpucupti.so | grep -A2 "stapsdt" | head -20
+          file build/amd64/libcolacupti.so
+          readelf -n build/amd64/libcolacupti.so | grep -A2 "stapsdt" | head -20
 
       - name: Log in to Container Registry
         if: github.event_name != 'pull_request'
@@ -109,10 +109,10 @@ jobs:
             --output type=local,dest=build/${{ matrix.arch }} \
             --platform linux/${{ matrix.arch }} \
             .
-          mv build/${{ matrix.arch }}/libparcagpucupti.so \
-             build/${{ matrix.arch }}/libparcagpucupti-${{ matrix.arch }}.so
+          mv build/${{ matrix.arch }}/libcolacupti.so \
+             build/${{ matrix.arch }}/libcolacupti-${{ matrix.arch }}.so
 
       - name: Upload to GitHub Release
         uses: softprops/action-gh-release@v1
         with:
-          files: build/${{ matrix.arch }}/libparcagpucupti-${{ matrix.arch }}.so
+          files: build/${{ matrix.arch }}/libcolacupti-${{ matrix.arch }}.so

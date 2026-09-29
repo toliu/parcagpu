@@ -1,8 +1,8 @@
 // Copyright 2026 The Parca Authors
 // SPDX-License-Identifier: Apache-2.0
 
-#ifndef PARCAGPU_STALL_REASON_MAP_H_
-#define PARCAGPU_STALL_REASON_MAP_H_
+#ifndef COLAGPU_STALL_REASON_MAP_H_
+#define COLAGPU_STALL_REASON_MAP_H_
 
 #include <cstdint>
 #include <cstdlib>
@@ -56,4 +56,4 @@ private:
 
 } // namespace parcagpu
 
-#endif // PARCAGPU_STALL_REASON_MAP_H_
+#endif // COLAGPU_STALL_REASON_MAP_H_

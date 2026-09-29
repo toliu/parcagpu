@@ -10,7 +10,7 @@
 //
 //	go generate ./...
 //	go build -o activity_parser .
-//	sudo ./activity_parser -pid <PID> -lib <path/to/libparcagpucupti.so>
+//	sudo ./activity_parser -pid <PID> -lib <path/to/libcolacupti.so>
 package main
 
 import (

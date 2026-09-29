@@ -15,7 +15,7 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 
-LIB="$ROOT/build-local/lib/libparcagpucupti.so"
+LIB="$ROOT/build-local/lib/libcolacupti.so"
 TEST_BIN="$ROOT/build-local/bin/test_cupti_prof"
 BPF="$ROOT/test/bpf/activity_parser"
 CUBIN="$ROOT/test/pc_sample_toy.cubin"
@@ -51,8 +51,8 @@ trap cleanup EXIT
 # short mock run (otherwise it would converge below 1 once samples flow).
 echo "=== Starting test_cupti_prof (mock) ==="
 LD_LIBRARY_PATH="$ROOT/build-local/lib:${LD_LIBRARY_PATH:-}" \
-  PARCAGPU_DEBUG=1 \
-  PARCAGPU_PC_SAMPLING_RATE=10000 \
+  COLAGPU_DEBUG=1 \
+  COLAGPU_PC_SAMPLING_RATE=10000 \
   MOCK_CUBIN_PATH="$CUBIN" \
   "$TEST_BIN" "$LIB" --launch-rate=50 --duration=15 > "$TEST_LOG" 2>&1 &
 TEST_PID=$!
@@ -60,7 +60,7 @@ echo "test_cupti_prof PID: $TEST_PID"
 
 # Wait for library to be loaded into the process.
 while kill -0 "$TEST_PID" 2>/dev/null &&
-      ! grep -q libparcagpucupti "/proc/$TEST_PID/maps" 2>/dev/null; do
+      ! grep -q libcolacupti "/proc/$TEST_PID/maps" 2>/dev/null; do
   sleep 0.1
 done
 

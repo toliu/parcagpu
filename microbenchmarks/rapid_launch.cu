@@ -6,7 +6,7 @@
 //
 // Compare:
 //   ./rapid_launch 50000                                          # baseline
-//   CUDA_INJECTION64_PATH=.../libparcagpucupti.so ./rapid_launch 50000  # injected
+//   CUDA_INJECTION64_PATH=.../libcolacupti.so ./rapid_launch 50000  # injected
 
 #include <cuda_runtime.h>
 #include <stdio.h>
